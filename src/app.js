@@ -2,7 +2,7 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
-import { NostrClient, importIdentity } from './red.js';
+import { NostrClient, importIdentity, eventoValido } from './red.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
   buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
@@ -358,9 +358,13 @@ async function restoreSession(ses) {
 function fetchMyPerfil() {
   return new Promise((resolve) => {
     let best = null;
+    const vistos = new Set(); // ids ya verificados en esta suscripción
     const sub = S.client.subscribe(
       [{ kinds: [KIND_PERFIL], authors: [S.pubkey], limit: 1 }],
       (ev) => {
+        if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
+        vistos.add(ev.id);
+        if (!eventoValido(ev)) { console.warn('[cubmatch] perfil propio con firma inválida, descartado:', ev.id); return; }
         const p = parsePerfilEvent(ev);
         if (p && (!best || ev.created_at > best.created_at)) best = p;
       }
@@ -929,7 +933,7 @@ async function loadMatches() {
     }
     body.innerHTML = '<div class="rows">' + mutuos.map((pk) => {
       const p = S.perfilCache.get(pk).profile;
-      const unread = (S.chats[pk] || LS.get('chats', {})[pk] || []).filter((m) => m.from === 'peer' && !m.read).length;
+      const unread = noLeidos(S.chats[pk] || LS.get('chats', {})[pk]);
       return '<div class="row">' +
         avatarImg(pk, p, 'avatar sm') +
         '<div class="r-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
@@ -950,7 +954,16 @@ function saveChats() {
   LS.set('chats', S.chats);
 }
 
+// Ids de eventos (DMs/receipts) cuya firma ya se verificó en esta sesión.
+// Un mismo evento llega una vez por relay; se verifica una sola vez.
+const sigOK = new Set();
+
 async function dmToMsg(ev) {
+  if (!ev || typeof ev.id !== 'string') return null;
+  if (!sigOK.has(ev.id)) {
+    if (!eventoValido(ev)) { console.warn('[cubmatch] DM con firma inválida, descartado:', ev.id); return null; }
+    sigOK.add(ev.id);
+  }
   const peer = ev.pubkey === S.pubkey
     ? (ev.tags.find((t) => t[0] === 'p') || [])[1]
     : ev.pubkey;
@@ -965,7 +978,11 @@ async function dmToMsg(ev) {
       from: ev.pubkey === S.pubkey ? 'me' : 'peer',
       ts: ev.created_at * 1000,
       text,
-      read: ev.pubkey !== S.pubkey,
+      // Semántica de read (C2):
+      // - entrante: NO leído hasta que el usuario abre ese chat
+      //   (showChat envía el receipt y lo marca).
+      // - enviado: pendiente hasta que llegue su receipt (handleReceipt).
+      read: false,
     },
   };
 }
@@ -980,12 +997,23 @@ function pushMsg(peer, msg) {
 }
 
 function handleReceipt(peer, ev) {
+  if (!ev || typeof ev.id !== 'string') return false;
+  if (!sigOK.has(ev.id)) {
+    if (!eventoValido(ev)) { console.warn('[cubmatch] receipt con firma inválida, descartado:', ev.id); return false; }
+    sigOK.add(ev.id);
+  }
   const e = (ev.tags.find((t) => t[0] === 'e') || [])[1];
   if (!e) return false;
   const msgs = S.chats[peer] || [];
   const m = msgs.find((x) => x.id === e && x.from === 'me' && !x.read);
   if (m) { m.read = true; saveChats(); return true; }
   return false;
+}
+
+// Cuántos mensajes del peer siguen sin leer en un chat.
+// (Es lo que muestra el badge "N nuevos" en Matches.)
+function noLeidos(chat) {
+  return (chat || []).filter((m) => m.from === 'peer' && !m.read).length;
 }
 
 async function syncChatHistory() {
@@ -1297,6 +1325,8 @@ function onAppClick(e) {
 // ---------- final ----------
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
+// Ganchos solo para tests (no usar en producción).
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

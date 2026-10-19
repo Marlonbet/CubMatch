@@ -5,6 +5,8 @@ import {
   generateSecretKey,
   getPublicKey,
   finalizeEvent,
+  verifyEvent,
+  verifiedSymbol,
   nip19,
   nip04,
 } from 'nostr-tools';
@@ -14,6 +16,26 @@ export const KIND_PROFILE = 0;     // perfil: {name}
 export const KIND_PRESENCE = 24501;// "en línea" (efímero, no se guarda)
 export const KIND_TYPING = 24502;  // "escribiendo…" (efímero)
 export const KIND_RECEIPT = 24503; // confirmación de lectura (se guarda)
+
+// Verifica la firma de un evento RECIBIDO de la red, ANTES de parsearlo.
+// Usar en cada punto de ingesta (perfiles, likes, DMs, receipts, claims);
+// descartar el inválido con console.warn. Nunca lanza.
+//
+// Detalle no obvio: nostr-tools cachea el resultado de la verificación en
+// un Symbol del objeto, y ese Symbol sobrevive a {...ev} (spread). Un evento
+// mutado después de firmar podría heredar un "true" falso. Los eventos que
+// llegan por WebSocket vienen de JSON.parse (sin symbols) y no tienen este
+// problema, pero aquí se borra la caché para forzar verificación
+// criptográfica real en todos los casos.
+export function eventoValido(ev) {
+  try {
+    if (!ev || typeof ev.id !== 'string') return false;
+    try { delete ev[verifiedSymbol]; } catch {}
+    return verifyEvent(ev) === true;
+  } catch {
+    return false;
+  }
+}
 
 const EPHEMERAL_MIN = 20000, EPHEMERAL_MAX = 29999;
 

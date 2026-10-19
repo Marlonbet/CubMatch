@@ -9,6 +9,11 @@
 // - Chat: solo tras match mutuo, DMs kind 4 (ver red.js).
 // - Reportes: NIP-56, eventos kind 1984.
 // - Bloqueos: lista local en localStorage (la maneja la UI).
+//
+// SEGURIDAD (C1): todo evento recibido se verifica con eventoValido()
+// ANTES de parsearlo. Sin firma válida no existe el perfil/like.
+
+import { eventoValido } from './red.js';
 
 export const KIND_PERFIL = 30079;
 export const KIND_LIKE = 7;        // NIP-25: "+" like, "-" dislike
@@ -65,9 +70,13 @@ export function publishPerfil(client, profile) {
 // sin el propio. Devuelve [{profile, pubkey, created_at, id, addr}].
 export async function fetchPerfiles(client, { limit = 300, includeHidden = false, excludeSelf = null } = {}) {
   const porAutor = new Map();
+  const vistos = new Set(); // ids ya verificados en esta suscripción (un evento llega por cada relay)
   const sub = client.subscribe(
     [{ kinds: [KIND_PERFIL], '#t': [TAG_T], limit }],
     (ev) => {
+      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
+      vistos.add(ev.id);
+      if (!eventoValido(ev)) { console.warn('[cubmatch] perfil con firma inválida, descartado:', ev.id); return; }
       const p = parsePerfilEvent(ev);
       if (!p) return;
       if (excludeSelf && p.pubkey === excludeSelf) return;
@@ -129,6 +138,7 @@ export function parseLikeEvent(ev, myPubkey) {
 export async function fetchLikes(client, myPubkey) {
   const myAddr = profileAddr(myPubkey);
   const sent = {}, received = {};
+  const vistos = new Set(); // ids ya verificados en esta suscripción
   const put = (map, like) => {
     const prev = map[like.peer];
     if (!prev || like.created_at > prev.ts) {
@@ -141,6 +151,9 @@ export async function fetchLikes(client, myPubkey) {
       { kinds: [KIND_LIKE], '#a': [myAddr], limit: 500 },
     ],
     (ev) => {
+      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
+      vistos.add(ev.id);
+      if (!eventoValido(ev)) { console.warn('[cubmatch] like con firma inválida, descartado:', ev.id); return; }
       const like = parseLikeEvent(ev, myPubkey);
       if (!like) return;
       if (like.from === myPubkey) put(sent, like);

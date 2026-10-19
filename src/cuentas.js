@@ -13,6 +13,7 @@
 
 import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { getPublicKey, nip19 } from 'nostr-tools';
+import { eventoValido } from './red.js';
 
 export const KIND_CLAIM = 30078;
 export const claimTag = (username) => `cubmatch:perfil:${username}`;
@@ -73,9 +74,15 @@ export function pickEarliestClaim(parsed) {
 
 export async function fetchUsernameClaim(client, username) {
   const out = [];
+  const vistos = new Set(); // ids ya verificados en esta suscripción
   const sub = client.subscribe(
     [{ kinds: [KIND_CLAIM], '#d': [claimTag(username)], limit: 10 }],
-    (ev) => { const p = parseClaimEvent(ev); if (p && p.username === username) out.push(p); }
+    (ev) => {
+      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
+      vistos.add(ev.id);
+      if (!eventoValido(ev)) { console.warn('[cubmatch] reclamo con firma inválida, descartado:', ev.id); return; }
+      const p = parseClaimEvent(ev); if (p && p.username === username) out.push(p);
+    }
   );
   await sub.eose();
   sub.unsub();
