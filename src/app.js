@@ -1,0 +1,1308 @@
+// CUBMATCH — UI completa (entry point, ES module; esbuild lo empaqueta en IIFE).
+// Vanilla JS, todo renderizado en #app con template strings.
+// Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
+
+import { NostrClient, importIdentity } from './red.js';
+import {
+  normalizeUsername, validatePassword, deriveSecretKey,
+  buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
+} from './cuentas.js';
+import {
+  KIND_PERFIL, RELAYS_DEFAULT,
+  parsePerfilEvent, publishPerfil, fetchPerfiles,
+  sendLike, sendDislike, fetchLikes, mutualMatches, sendReporte,
+} from './cubmatch.js';
+import {
+  newProfile, completitud, validateProfile, avatarDataURI,
+  PROVINCIAS, GENEROS, ORIENTACIONES, COMPLEXIONES, OJOS, PIEL, CABELLO,
+  EDUCACION, SECTORES, VALORES, INTERESES, RASGOS, RELACIONES, DISTANCIAS,
+  PROMPTS, MAX_BIO, MAX_TAGS,
+} from './perfil.js';
+import { buildCorpus, rankCandidates, topDaily } from './matching.js';
+
+// ---------- utilidades ----------
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
+const hoyISO = () => {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+const horaCorta = (ts) => {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+};
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+}
+function setPath(obj, path, v) {
+  const ks = path.split('.');
+  let o = obj;
+  for (let i = 0; i < ks.length - 1; i++) {
+    if (o[ks[i]] == null || typeof o[ks[i]] !== 'object') o[ks[i]] = {};
+    o = o[ks[i]];
+  }
+  o[ks[ks.length - 1]] = v;
+}
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+// ---------- localStorage (prefijo cubmatch_) ----------
+const LS = {
+  get(k, def) {
+    try {
+      const v = localStorage.getItem('cubmatch_' + k);
+      return v == null ? def : JSON.parse(v);
+    } catch { return def; }
+  },
+  set(k, v) {
+    try { localStorage.setItem('cubmatch_' + k, JSON.stringify(v)); } catch {}
+  },
+  del(k) {
+    try { localStorage.removeItem('cubmatch_' + k); } catch {}
+  },
+};
+
+// ---------- estado global ----------
+const S = {
+  client: null, sk: null, pubkey: null, username: null, npub: null,
+  miPerfil: null, borrador: null, obPaso: 1,
+  vistos: [], bloqueados: [],
+  relays: null, datosBajos: false, relayStatus: {},
+  data: null,            // {perfiles, likes, corpus, ctx, me}
+  candidatos: [], idx: 0,
+  top: [],
+  perfilCache: new Map(),
+  chats: {},             // peerPubkey -> [{id,from,ts,text,read}]
+  chatPeer: null, chatSubs: [],
+  cuentaModo: 'registro',
+  timers: [],
+  screen: 'inicio',
+};
+let wired = false;
+
+// ---------- toast ----------
+function toast(msg, ms) {
+  let box = $('#toasts');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toasts';
+    document.body.appendChild(box);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  box.appendChild(el);
+  const t = setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 400); }, ms || 3200);
+  S.timers.push(t);
+}
+
+// ---------- cliente Nostr ----------
+function makeClient(sk) {
+  const relays = S.relays || RELAYS_DEFAULT;
+  const client = new NostrClient({
+    relays,
+    secretKey: sk,
+    onRelayStatus: (url, st) => {
+      S.relayStatus[url] = st;
+      const row = document.querySelector('.relay-row[data-url="' + CSS.escape(url) + '"] .rdot');
+      if (row) row.className = 'rdot ' + (st === 'open' ? 'g' : st === 'connecting' ? 'y' : 'r');
+    },
+  });
+  client.connect();
+  return client;
+}
+
+function stopChat() {
+  for (const sub of S.chatSubs) { try { sub.unsub(); } catch {} }
+  S.chatSubs = [];
+  S.chatPeer = null;
+}
+
+export function dispose() {
+  for (const t of S.timers) { clearTimeout(t); clearInterval(t); }
+  S.timers = [];
+  stopChat();
+  try { if (S.client) S.client.close(); } catch {}
+  S.client = null;
+}
+
+export function boot() {
+  dispose();
+  const root = document.getElementById('app');
+  if (root) root.innerHTML = '';
+  Object.assign(S, {
+    sk: null, pubkey: null, username: null, npub: null,
+    miPerfil: null, borrador: null, obPaso: 1,
+    data: null, candidatos: [], idx: 0, top: [],
+    chats: {}, screen: 'inicio', cuentaModo: 'registro',
+    relayStatus: {},
+  });
+  S.perfilCache = new Map();
+  S.vistos = LS.get('vistos', []);
+  S.bloqueados = LS.get('bloqueados', []);
+  S.relays = LS.get('relays', null);
+  S.datosBajos = LS.get('datosbajos', '0') === '1';
+  if (!wired) { wired = true; wireEvents(); }
+  const ses = LS.get('sesion', null);
+  if (ses && ses.username && ses.nsec) restoreSession(ses);
+  else showInicio();
+}
+
+function wireEvents() {
+  const root = document.getElementById('app');
+  root.addEventListener('click', onAppClick);
+  root.addEventListener('input', onDraftInput);
+  root.addEventListener('change', onDraftInput);
+  root.addEventListener('submit', (e) => {
+    if (e.target.id === 'cuenta-form') { e.preventDefault(); submitCuenta(); }
+    else if (e.target.id === 'chat-form') { e.preventDefault(); submitChat(); }
+  });
+}
+
+// ---------- helpers de UI ----------
+function avatarImg(pubkey, profile, cls) {
+  const fb = avatarDataURI(pubkey, profile.apodo);
+  const src = profile.fotoURL && String(profile.fotoURL).trim() ? String(profile.fotoURL).trim() : fb;
+  return '<img class="' + (cls || 'avatar') + '" src="' + esc(src) + '" data-fb="' + esc(fb) +
+    '" alt="" loading="lazy" onerror="if(this.dataset.fb){this.src=this.dataset.fb;this.removeAttribute(\'data-fb\');}">';
+}
+function nombreEdad(p) {
+  const edad = (p.mostrarEdad !== false && p.edad) ? ', ' + esc(p.edad) : '';
+  return esc(p.apodo || 'Sin nombre') + edad;
+}
+function lugar(p) {
+  const bits = [];
+  if (p.municipio) bits.push(p.municipio);
+  if (p.provincia) bits.push(p.provincia);
+  return esc(bits.join(', ') || 'Cuba');
+}
+function compatPct(total) {
+  const n = Math.round(Number(total || 0) * 100);
+  return Math.max(0, Math.min(100, n));
+}
+function navHTML(active) {
+  const tabs = [
+    ['deck', 'Descubrir', '🔥'],
+    ['top10', 'Top 10', '⭐'],
+    ['matches', 'Matches', '💬'],
+    ['ajustes', 'Ajustes', '⚙️'],
+  ];
+  return '<nav class="tabnav">' + tabs.map(([id, label, ico]) =>
+    '<button type="button" class="tab' + (active === id ? ' active' : '') + '" data-act="nav-' + id + '">' +
+    '<span class="tico">' + ico + '</span><span>' + label + '</span></button>'
+  ).join('') + '</nav>';
+}
+function pantallaShell(active, inner) {
+  return '<div class="screen has-nav"><div class="scroll">' + inner + '</div>' + navHTML(active) + '</div>';
+}
+function cargandoHTML(msg) {
+  return '<div class="center-pad"><div class="spinner"></div><p class="muted">' + esc(msg || 'Cargando…') + '</p></div>';
+}
+function marcarVisto(pubkey) {
+  if (!S.vistos.includes(pubkey)) {
+    S.vistos.push(pubkey);
+    LS.set('vistos', S.vistos);
+  }
+}
+function superlikeDisponible() {
+  const s = LS.get('superlike', { fecha: '', n: 0 });
+  return !(s.fecha === hoyISO() && s.n >= 1);
+}
+function marcarSuperlike() {
+  LS.set('superlike', { fecha: hoyISO(), n: 1 });
+}
+
+// ---------- 1. inicio ----------
+function showInicio() {
+  S.screen = 'inicio';
+  $('#app').innerHTML =
+    '<div class="screen inicio" id="pantalla-inicio">' +
+    '<div class="brand"><div class="logo">❤️‍🔥</div><h1>CubMatch</h1>' +
+    '<p class="tagline">Conoce gente en Cuba, sin intermediarios.<br>Directo, gratis y sin VPN.</p></div>' +
+    '<div class="inicio-btns">' +
+    '<button type="button" class="btn primary big" data-act="ir-registro">Crear cuenta</button>' +
+    '<button type="button" class="btn ghost big" data-act="ir-login">Ya tengo cuenta</button>' +
+    '</div>' +
+    '<p class="fine">Tu identidad vive en tu teléfono.<br>Sin servidores, sin tarjeta, sin rastreo.</p>' +
+    '</div>';
+}
+
+// ---------- 2. cuenta: registro / login ----------
+function showCuenta(modo) {
+  S.screen = 'cuenta';
+  S.cuentaModo = modo || 'registro';
+  const reg = S.cuentaModo === 'registro';
+  $('#app').innerHTML =
+    '<div class="screen"><div class="scroll"><div class="form-wrap">' +
+    '<button type="button" class="link" data-act="ir-inicio">← Volver</button>' +
+    '<h2>' + (reg ? 'Crea tu cuenta' : 'Entra a tu cuenta') + '</h2>' +
+    '<p class="muted">' + (reg
+      ? 'Tu usuario se reclama en la red; tu contraseña genera tu identidad. Nadie la guarda: si la olvidas, la cuenta se pierde.'
+      : 'La misma contraseña de siempre recupera tu identidad en cualquier teléfono.') + '</p>' +
+    '<form id="cuenta-form" autocomplete="off">' +
+    '<label>Usuario<input name="usuario" type="text" inputmode="latin" autocapitalize="none" autocomplete="username" placeholder="ej: marlon92" required></label>' +
+    '<label>Contraseña<input name="clave" type="password" autocomplete="' + (reg ? 'new-password' : 'current-password') + '" placeholder="mínimo 8 caracteres" required></label>' +
+    '<div class="error-box" id="cuenta-error" hidden></div>' +
+    '<button type="submit" class="btn primary big" id="cuenta-btn">' + (reg ? 'Crear cuenta' : 'Entrar') + '</button>' +
+    '</form>' +
+    '<p class="center muted">' + (reg
+      ? '¿Ya tienes cuenta? <button type="button" class="link" data-act="ir-login">Entra aquí</button>'
+      : '¿No tienes cuenta? <button type="button" class="link" data-act="ir-registro">Crea una</button>') + '</p>' +
+    '</div></div></div>';
+}
+
+function cuentaError(msg) {
+  const box = $('#cuenta-error');
+  if (!box) return;
+  box.hidden = false;
+  box.textContent = msg;
+}
+
+async function submitCuenta() {
+  const form = $('#cuenta-form');
+  const btn = $('#cuenta-btn');
+  const usuarioRaw = form.usuario.value;
+  const clave = form.clave.value;
+  $('#cuenta-error').hidden = true;
+  let username;
+  try {
+    username = normalizeUsername(usuarioRaw);
+    validatePassword(clave);
+  } catch (e) {
+    cuentaError(e.message);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Derivando tu identidad…';
+  try {
+    const sk = await deriveSecretKey(username, clave);
+    btn.textContent = 'Conectando a la red…';
+    const tmp = makeClient(sk);
+    try {
+      const claim = await fetchUsernameClaim(tmp, username);
+      if (S.cuentaModo === 'registro') {
+        if (claim) throw new Error('Ese usuario ya está tomado. Prueba con otro.');
+        btn.textContent = 'Reclamando tu usuario…';
+        await tmp.publish(buildClaimEvent(username));
+      } else {
+        const { pubkey } = importIdentity(nsecOf(sk));
+        if (!verifyCredentials(pubkey, claim)) {
+          throw new Error('Usuario o contraseña incorrectos.');
+        }
+      }
+    } finally {
+      tmp.close();
+    }
+    btn.textContent = 'Listo ✓';
+    await enterApp(username, sk);
+  } catch (e) {
+    const msg = /fetch|network|relays|conexión|tiempo/i.test(e.message || '')
+      ? 'Sin conexión a los relays. Revisa tu internet e intenta de nuevo.'
+      : (e.message || 'Algo salió mal. Intenta de nuevo.');
+    cuentaError(msg);
+    btn.disabled = false;
+    btn.textContent = S.cuentaModo === 'registro' ? 'Crear cuenta' : 'Entrar';
+  }
+}
+
+async function enterApp(username, sk) {
+  const id = importIdentity(nsecOf(sk));
+  LS.set('sesion', { username, nsec: nsecOf(sk) });
+  S.username = username;
+  S.sk = sk;
+  S.pubkey = id.pubkey;
+  S.npub = id.npub;
+  if (S.client) { try { S.client.close(); } catch {} }
+  S.client = makeClient(sk);
+  $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Buscando tu perfil…') + '</div>';
+  let mine = null;
+  try { mine = await fetchMyPerfil(); } catch {}
+  if (mine && mine.profile) {
+    S.miPerfil = mine.profile;
+    showDeck();
+  } else {
+    S.borrador = LS.get('perfil', null) || newProfile();
+    S.obPaso = 1;
+    showOnboarding();
+  }
+}
+
+async function restoreSession(ses) {
+  try {
+    const id = importIdentity(ses.nsec);
+    S.username = ses.username;
+    S.sk = id.sk;
+    S.pubkey = id.pubkey;
+    S.npub = id.npub;
+    S.client = makeClient(id.sk);
+    $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Reconectando…') + '</div>';
+    let mine = null;
+    try { mine = await fetchMyPerfil(); } catch {}
+    if (mine && mine.profile) {
+      S.miPerfil = mine.profile;
+      showDeck();
+    } else {
+      S.borrador = LS.get('perfil', null) || newProfile();
+      S.obPaso = 1;
+      showOnboarding();
+    }
+  } catch {
+    LS.del('sesion');
+    showInicio();
+    toast('No se pudo restaurar la sesión. Entra de nuevo.');
+  }
+}
+
+function fetchMyPerfil() {
+  return new Promise((resolve) => {
+    let best = null;
+    const sub = S.client.subscribe(
+      [{ kinds: [KIND_PERFIL], authors: [S.pubkey], limit: 1 }],
+      (ev) => {
+        const p = parsePerfilEvent(ev);
+        if (p && (!best || ev.created_at > best.created_at)) best = p;
+      }
+    );
+    sub.eose().then(() => { sub.unsub(); resolve(best); });
+  });
+}
+
+// ---------- 3. onboarding (8 pasos) ----------
+const OB_TITULOS = [
+  'Identidad', 'Físico', 'Educación y trabajo', 'Estilo de vida',
+  'Valores y personalidad', 'Intereses', 'Sobre ti', 'Preferencias',
+];
+
+function showOnboarding() {
+  S.screen = 'onboarding';
+  if (!S.borrador) S.borrador = LS.get('perfil', null) || newProfile();
+  $('#app').innerHTML =
+    '<div class="screen"><div class="scroll"><div class="form-wrap">' +
+    '<div class="ob-head"><span id="ob-paso"></span><span id="ob-pct" class="pct"></span></div>' +
+    '<div class="prog"><div class="prog-fill" id="ob-prog"></div></div>' +
+    '<h2 id="ob-titulo"></h2>' +
+    '<div id="ob-body"></div>' +
+    '<div class="error-box" id="ob-errores" hidden></div>' +
+    '<div class="ob-nav">' +
+    '<button type="button" class="btn ghost" data-act="ob-atras">Atrás</button>' +
+    '<button type="button" class="btn primary" data-act="ob-siguiente" id="ob-next">Siguiente</button>' +
+    '</div>' +
+    '</div></div></div>';
+  renderObPaso();
+}
+
+function updateProgress() {
+  const pct = completitud(S.borrador);
+  const bar = $('#ob-prog');
+  const lab = $('#ob-pct');
+  if (bar) bar.style.width = pct + '%';
+  if (lab) lab.textContent = pct + '% completo';
+}
+
+function renderObPaso() {
+  const paso = S.obPaso;
+  $('#ob-paso').textContent = 'Paso ' + paso + ' de 8';
+  $('#ob-titulo').textContent = OB_TITULOS[paso - 1];
+  $('#ob-next').textContent = paso === 8 ? 'Publicar mi perfil' : 'Siguiente';
+  $('#ob-errores').hidden = true;
+  $('#ob-body').innerHTML = OB_STEPS[paso - 1]();
+  updateProgress();
+  const bio = $('#bio-count');
+  if (bio) bio.textContent = String(S.borrador.bio || '').length + '/' + MAX_BIO;
+}
+
+function selectHTML(f, list, cur, placeholder) {
+  const opts = list.map((item) => {
+    const v = typeof item === 'object' ? item.id : item;
+    const l = typeof item === 'object' ? item.label : item;
+    return '<option value="' + esc(v) + '"' + (String(v) === String(cur ?? '') ? ' selected' : '') + '>' + esc(l) + '</option>';
+  }).join('');
+  return '<select data-f="' + f + '"><option value="">' + esc(placeholder || '— elige —') + '</option>' + opts + '</select>';
+}
+function field(label, inner) {
+  return '<label class="fld"><span>' + esc(label) + '</span>' + inner + '</label>';
+}
+function chipsHTML(name, list, selected) {
+  return '<div class="chips">' + list.map((item) => {
+    const id = typeof item === 'object' ? item.id : item;
+    const l = typeof item === 'object' ? item.label : item;
+    const on = (selected || []).includes(id) ? ' sel' : '';
+    return '<button type="button" class="chip' + on + '" data-chip="' + esc(name) + ':' + esc(id) + '">' + esc(l) + '</button>';
+  }).join('') + '</div>';
+}
+
+const OB_STEPS = [
+  // 1 Identidad
+  () => {
+    const d = S.borrador;
+    return field('Apodo', '<input data-f="apodo" value="' + esc(d.apodo) + '" placeholder="¿Cómo te dicen?" maxlength="30">') +
+      field('Edad', '<input data-f="edad" type="number" min="18" max="99" value="' + esc(d.edad) + '" placeholder="18+">') +
+      field('Género', selectHTML('genero', GENEROS, d.genero)) +
+      field('Orientación', selectHTML('orientacion', ORIENTACIONES, d.orientacion)) +
+      field('Provincia', selectHTML('provincia', PROVINCIAS, d.provincia)) +
+      field('Municipio', '<input data-f="municipio" value="' + esc(d.municipio) + '" placeholder="Ej: Palma Soriano">');
+  },
+  // 2 Físico
+  () => {
+    const d = S.borrador;
+    return field('Estatura (cm)', '<input data-f="estatura" type="number" min="130" max="230" value="' + esc(d.estatura) + '" placeholder="Ej: 175">') +
+      field('Complexión', selectHTML('complexion', COMPLEXIONES, d.complexion)) +
+      field('Color de ojos', selectHTML('ojos', OJOS, d.ojos)) +
+      field('Piel', selectHTML('piel', PIEL, d.piel)) +
+      field('Cabello', selectHTML('cabello', CABELLO, d.cabello));
+  },
+  // 3 Educación y trabajo
+  () => {
+    const d = S.borrador;
+    return field('Nivel de educación', selectHTML('educacion', EDUCACION, d.educacion)) +
+      field('Profesión / oficio', '<input data-f="profesion" value="' + esc(d.profesion) + '" placeholder="Ej: enfermera, mecánico…">') +
+      field('Sector', selectHTML('sector', SECTORES, d.sector));
+  },
+  // 4 Estilo de vida
+  () => {
+    const d = S.borrador;
+    const sino = (f, v) => selectHTML(f, ['Sí', 'No'], v);
+    return field('¿Fumas?', selectHTML('fumador', ['No', 'Ocasionalmente', 'Sí'], d.fumador)) +
+      field('¿Bebes?', selectHTML('bebedor', ['No', 'Ocasionalmente', 'Sí'], d.bebedor)) +
+      field('¿Haces deporte?', selectHTML('deporte', ['Sí', 'A veces', 'No'], d.deporte)) +
+      field('Religión / creencia', '<input data-f="religion" value="' + esc(d.religion) + '" placeholder="Opcional">') +
+      field('¿Tienes hijos?', selectHTML('hijosTiene', ['No tengo', 'Tengo'], d.hijosTiene)) +
+      field('¿Quieres hijos?', selectHTML('hijosQuiere', ['Sí', 'No', 'Tal vez'], d.hijosQuiere)) +
+      field('¿Mascotas?', sino('mascotas', d.mascotas));
+  },
+  // 5 Valores y personalidad
+  () => {
+    const d = S.borrador;
+    const sliders = RASGOS.map((r) => {
+      const v = +(getPath(d, 'rasgos.' + r.id) ?? 3);
+      return '<div class="slider-row"><span>' + esc(r.label) + '</span>' +
+        '<input type="range" min="1" max="5" step="1" value="' + v + '" data-f="rasgos.' + r.id + '">' +
+        '<b data-out="rasgos.' + r.id + '">' + v + '</b></div>';
+    }).join('');
+    return '<p class="fld-label">¿Qué valoras? (elige varios)</p>' + chipsHTML('valores', VALORES, d.valores) +
+      '<p class="fld-label">¿Cómo eres? (1 = poco, 5 = mucho)</p><div class="sliders">' + sliders + '</div>';
+  },
+  // 6 Intereses
+  () => {
+    const d = S.borrador;
+    return '<p class="fld-label">¿Qué te gusta? (elige varios)</p>' + chipsHTML('intereses', INTERESES, d.intereses) +
+      field('Tags libres (separados por coma, máx ' + MAX_TAGS + ')',
+        '<input data-f="tags" data-split="1" value="' + esc((d.tags || []).join(', ')) + '" placeholder="Ej: café, malecón, trova">');
+  },
+  // 7 Sobre ti
+  () => {
+    const d = S.borrador;
+    let prompts = '';
+    for (let i = 0; i < 3; i++) {
+      const pr = (d.prompts || [])[i] || { q: '', a: '' };
+      prompts += '<div class="prompt-row">' + selectHTML('prompts.' + i + '.q', PROMPTS, pr.q, '— elige un prompt —') +
+        '<input data-f="prompts.' + i + '.a" value="' + esc(pr.a) + '" placeholder="Tu respuesta…"></div>';
+    }
+    return field('Tu bio',
+      '<textarea data-f="bio" rows="4" maxlength="' + MAX_BIO + '" placeholder="Cuéntale al mundo quién eres…">' + esc(d.bio) + '</textarea>' +
+      '<small class="count" id="bio-count"></small>') +
+      '<p class="fld-label">Prompts (opcional)</p>' + prompts +
+      field('Descríbete en 3 palabras', '<input data-f="tresPalabras" value="' + esc(d.tresPalabras) + '" placeholder="Ej: alegre, sincero, soñador">') +
+      field('Foto (URL opcional)', '<input data-f="fotoURL" type="url" inputmode="url" value="' + esc(d.fotoURL) + '" placeholder="https://…">') +
+      '<label class="check"><input type="checkbox" data-f="mostrarEdad"' + (d.mostrarEdad !== false ? ' checked' : '') + '> Mostrar mi edad en el perfil</label>';
+  },
+  // 8 Preferencias
+  () => {
+    const d = S.borrador;
+    const p = d.prefs || {};
+    return '<div class="row2">' +
+      field('Edad mínima', '<input data-f="prefs.edadMin" type="number" min="18" max="99" value="' + esc(p.edadMin ?? 18) + '">') +
+      field('Edad máxima', '<input data-f="prefs.edadMax" type="number" min="18" max="99" value="' + esc(p.edadMax ?? 99) + '">') +
+      '</div>' +
+      '<p class="fld-label">Busco</p>' + chipsHTML('prefs.generos', GENEROS, p.generos) +
+      field('Distancia', selectHTML('prefs.distancia', DISTANCIAS, p.distancia || 'cuba')) +
+      '<p class="fld-label">Tipo de relación</p>' + chipsHTML('prefs.relacion', RELACIONES, p.relacion);
+  },
+];
+
+function onDraftInput(e) {
+  const t = e.target;
+  if (!t || !t.dataset) return;
+  if (S.screen !== 'onboarding' || !S.borrador) return;
+  if (t.dataset.chip) return;
+  let handled = false;
+  if (t.dataset.f) {
+    let v;
+    if (t.type === 'checkbox') v = t.checked;
+    else if (t.dataset.split) v = t.value.split(',').map((s) => s.trim()).filter(Boolean).slice(0, MAX_TAGS);
+    else if (t.type === 'number' || t.type === 'range') v = t.value === '' ? '' : Number(t.value);
+    else v = t.value;
+    // prompts: data-f="prompts.0.a" -> asegurar objeto
+    const m = /^prompts\.(\d+)\.([qa])$/.exec(t.dataset.f);
+    if (m) {
+      const i = +m[1];
+      S.borrador.prompts = S.borrador.prompts || [];
+      S.borrador.prompts[i] = S.borrador.prompts[i] || { q: '', a: '' };
+      S.borrador.prompts[i][m[2]] = v;
+    } else {
+      setPath(S.borrador, t.dataset.f, v);
+    }
+    handled = true;
+    if (t.type === 'range') {
+      const out = document.querySelector('[data-out="' + CSS.escape(t.dataset.f) + '"]');
+      if (out) out.textContent = t.value;
+    }
+    if (t.dataset.f === 'bio') {
+      const c = $('#bio-count');
+      if (c) c.textContent = String(t.value).length + '/' + MAX_BIO;
+    }
+  } else if (t.dataset.pq !== undefined || t.dataset.pa !== undefined) {
+    handled = true; // legado: no se usa (los prompts usan data-f)
+  }
+  if (handled) {
+    LS.set('perfil', S.borrador);
+    updateProgress();
+  }
+}
+
+function toggleChip(btn) {
+  const [name, id] = btn.dataset.chip.split(':');
+  if (S.screen !== 'onboarding' || !S.borrador) return;
+  let arr = getPath(S.borrador, name);
+  if (!Array.isArray(arr)) { arr = []; setPath(S.borrador, name, arr); }
+  const i = arr.indexOf(id);
+  if (i >= 0) { arr.splice(i, 1); btn.classList.remove('sel'); }
+  else { arr.push(id); btn.classList.add('sel'); }
+  LS.set('perfil', S.borrador);
+  updateProgress();
+}
+
+function obAtras() {
+  if (S.obPaso > 1) {
+    S.obPaso--;
+    renderObPaso();
+  } else if (S.miPerfil) {
+    showAjustes();
+  } else {
+    showInicio();
+  }
+}
+
+async function obSiguiente() {
+  if (S.obPaso < 8) {
+    S.obPaso++;
+    renderObPaso();
+    $('.scroll').scrollTop = 0;
+    return;
+  }
+  // paso 8: publicar
+  const btn = $('#ob-next');
+  const box = $('#ob-errores');
+  const errores = validateProfile(S.borrador);
+  if (errores.length) {
+    box.hidden = false;
+    box.innerHTML = '<ul>' + errores.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+    box.scrollIntoView();
+    return;
+  }
+  box.hidden = true;
+  btn.disabled = true;
+  btn.textContent = 'Publicando…';
+  try {
+    S.borrador.prompts = (S.borrador.prompts || []).filter((p) => p && (p.q || p.a));
+    S.borrador.oculto = !!(S.miPerfil && S.miPerfil.oculto);
+    await publishPerfil(S.client, S.borrador);
+    S.miPerfil = clone(S.borrador);
+    LS.set('perfil', S.borrador);
+    toast('¡Tu perfil ya está en la red! 🎉');
+    showDeck();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+    btn.disabled = false;
+    btn.textContent = 'Publicar mi perfil';
+  }
+}
+
+// ---------- datos compartidos deck / top10 / matches ----------
+async function ensureData() {
+  if (S.data) return S.data;
+  const limit = S.datosBajos ? 120 : 400;
+  const perfiles = await fetchPerfiles(S.client, { limit, excludeSelf: S.pubkey });
+  S.perfilCache = new Map(perfiles.map((p) => [p.pubkey, p]));
+  const likes = await fetchLikes(S.client, S.pubkey);
+  const me = { pubkey: S.pubkey, profile: S.miPerfil, bloqueados: S.bloqueados, vistos: S.vistos };
+  const others = perfiles.map((p) => ({ pubkey: p.pubkey, profile: p.profile, created_at: p.created_at }));
+  const corpus = buildCorpus([S.miPerfil, ...perfiles.map((p) => p.profile)]);
+  const ctx = { corpus, likes, nowMs: Date.now() };
+  S.data = { perfiles, likes, corpus, ctx, me, others };
+  return S.data;
+}
+
+// ---------- 4. deck ----------
+function showDeck() {
+  stopChat();
+  S.screen = 'deck';
+  if (!S.miPerfil) {
+    S.borrador = LS.get('perfil', null) || newProfile();
+    S.obPaso = 1;
+    showOnboarding();
+    return;
+  }
+  $('#app').innerHTML = pantallaShell('deck',
+    '<div class="deck-head"><div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div>' +
+    '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
+  loadDeck();
+}
+
+async function loadDeck() {
+  const body = $('#deck-body');
+  try {
+    const d = await ensureData();
+    S.candidatos = rankCandidates(d.me, d.others, d.ctx);
+    S.idx = 0;
+    renderCard();
+  } catch {
+    if (!body) return;
+    body.innerHTML = '<div class="center-pad"><p>😕 Sin conexión a los relays.</p>' +
+      '<button type="button" class="btn primary" data-act="deck-recargar">Reintentar</button></div>';
+  }
+}
+
+function curCand() { return S.candidatos[S.idx]; }
+
+function cardHTML(c) {
+  const p = c.other.profile;
+  const pct = compatPct(c.total);
+  const prompts = (p.prompts || []).filter((x) => x && x.q).slice(0, 3).map((x) =>
+    '<div class="prompt"><b>' + esc(x.q) + '</b><span>' + esc(x.a || '') + '</span></div>').join('');
+  const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 10)
+    .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
+  return '<div class="tarjeta">' +
+    '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
+    '<div class="compat">' + pct + '%</div></div>' +
+    '<div class="t-body">' +
+    '<h3>' + nombreEdad(p) + '</h3>' +
+    '<p class="muted">📍 ' + lugar(p) + '</p>' +
+    (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
+    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '') +
+    prompts +
+    (chips ? '<div class="chips static">' + chips + '</div>' : '') +
+    '</div>' +
+    '<div class="t-actions">' +
+    '<button type="button" class="btn round dislike" data-act="deck-no" title="No me interesa">✕</button>' +
+    '<button type="button" class="btn round info" data-act="deck-info" title="Más info">i</button>' +
+    '<button type="button" class="btn round super" data-act="deck-super"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)">⭐</button>' +
+    '<button type="button" class="btn round like" data-act="deck-si" title="Me gusta">♥</button>' +
+    '</div></div>';
+}
+
+function renderCard() {
+  const body = $('#deck-body');
+  if (!body) return;
+  const c = curCand();
+  const sub = $('#deck-sub');
+  if (!c) {
+    if (sub) sub.textContent = 'Eso es todo por ahora.';
+    body.innerHTML = '<div class="center-pad"><p class="big">👋</p>' +
+      '<p>Ya viste todos los perfiles disponibles.<br>Vuelve más tarde o re-descubre la red.</p>' +
+      '<button type="button" class="btn primary" data-act="deck-recargar">Re-descubrir</button></div>';
+    return;
+  }
+  if (sub) sub.textContent = 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length;
+  body.innerHTML = cardHTML(c);
+}
+
+function nextCard() {
+  S.idx++;
+  renderCard();
+}
+
+function setCardBusy(busy) {
+  $$('#deck-body .t-actions .btn').forEach((b) => { b.disabled = busy; });
+}
+
+async function doLike(superlike) {
+  const c = curCand();
+  if (!c) return;
+  if (superlike && !superlikeDisponible()) {
+    toast('Ya usaste tu super-like de hoy ⭐');
+    return;
+  }
+  setCardBusy(true);
+  try {
+    await sendLike(S.client, c.other.pubkey, { superlike: !!superlike });
+    if (superlike) marcarSuperlike();
+    S.data.likes.sent[c.other.pubkey] = { tipo: '+', superlike: !!superlike, ts: Math.floor(Date.now() / 1000) };
+    marcarVisto(c.other.pubkey);
+    const mutuo = S.data.likes.received[c.other.pubkey] && S.data.likes.received[c.other.pubkey].tipo === '+';
+    if (mutuo) showMatchOverlay(c.other.pubkey);
+    else nextCard();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+    setCardBusy(false);
+  }
+}
+
+async function doDislike() {
+  const c = curCand();
+  if (!c) return;
+  setCardBusy(true);
+  try {
+    await sendDislike(S.client, c.other.pubkey);
+    S.data.likes.sent[c.other.pubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
+    marcarVisto(c.other.pubkey);
+    nextCard();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+    setCardBusy(false);
+  }
+}
+
+function showMatchOverlay(peerPubkey) {
+  const prof = S.perfilCache.get(peerPubkey)?.profile;
+  const nombre = prof ? prof.apodo : 'alguien';
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = 'match-overlay';
+  ov.innerHTML = '<div class="sheet match">' +
+    '<div class="big">💘</div><h2>¡Match!</h2>' +
+    '<p>A ti y a <b>' + esc(nombre) + '</b> les gustó su perfil.<br>¡Escríbele!</p>' +
+    '<div class="match-avatars">' + avatarImg(S.pubkey, S.miPerfil, 'avatar') +
+    (prof ? avatarImg(peerPubkey, prof, 'avatar') : '') + '</div>' +
+    '<button type="button" class="btn primary big" data-act="match-chatear" data-peer="' + esc(peerPubkey) + '">Chatear ahora</button>' +
+    '<button type="button" class="btn ghost" data-act="match-seguir">Seguir descubriendo</button>' +
+    '</div>';
+  document.getElementById("app").appendChild(ov);
+}
+
+// ---------- detalle expandido + reportar/bloquear ----------
+function showDetalle(peerPubkey) {
+  const entry = S.perfilCache.get(peerPubkey);
+  if (!entry) return;
+  const p = entry.profile;
+  const rasgos = RASGOS.map((r) => {
+    const v = +(p.rasgos?.[r.id] ?? 3);
+    return '<div class="rasgo"><span>' + esc(r.label) + '</span><div class="rbar"><div style="width:' + (v * 20) + '%"></div></div><b>' + v + '/5</b></div>';
+  }).join('');
+  const prompts = (p.prompts || []).filter((x) => x && x.q).map((x) =>
+    '<div class="prompt"><b>' + esc(x.q) + '</b><span>' + esc(x.a || '—') + '</span></div>').join('');
+  const chips = (t, arr) => (arr && arr.length)
+    ? '<p class="fld-label">' + t + '</p><div class="chips static">' + arr.map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('') + '</div>' : '';
+  const dato = (l, v) => v ? '<div class="dato"><span>' + l + '</span><b>' + esc(v) + '</b></div>' : '';
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = 'detalle-overlay';
+  ov.innerHTML = '<div class="sheet detalle" role="dialog">' +
+    '<button type="button" class="x" data-act="detalle-cerrar">✕</button>' +
+    avatarImg(peerPubkey, p, 'avatar big') +
+    '<h3>' + nombreEdad(p) + '</h3><p class="muted">📍 ' + lugar(p) + '</p>' +
+    (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
+    prompts +
+    '<div class="datos">' +
+    dato('Estatura', p.estatura ? p.estatura + ' cm' : '') + dato('Complexión', p.complexion) +
+    dato('Ojos', p.ojos) + dato('Piel', p.piel) + dato('Cabello', p.cabello) +
+    dato('Educación', p.educacion) + dato('Profesión', p.profesion) + dato('Sector', p.sector) +
+    dato('Fuma', p.fumador) + dato('Bebe', p.bebedor) + dato('Deporte', p.deporte) +
+    dato('Hijos', p.hijosTiene) + dato('Quiere hijos', p.hijosQuiere) + dato('Mascotas', p.mascotas) +
+    '</div>' +
+    '<p class="fld-label">Personalidad</p>' + rasgos +
+    chips('Valores', p.valores) + chips('Intereses', p.intereses) + chips('Tags', p.tags) +
+    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '') +
+    '<div class="row-btns">' +
+    '<button type="button" class="btn warn" data-act="perfil-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
+    '<button type="button" class="btn danger" data-act="perfil-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
+    '</div></div>';
+  ov.addEventListener('click', (e) => { if (e.target === ov) closeDetalle(); });
+  document.getElementById("app").appendChild(ov);
+}
+function closeDetalle() {
+  const ov = $('#detalle-overlay');
+  if (ov) ov.remove();
+}
+
+async function reportarPerfil(peerPubkey) {
+  const motivo = prompt('¿Por qué reportas este perfil?');
+  if (motivo === null) return;
+  const m = motivo.trim();
+  if (!m) { toast('Escribe un motivo para el reporte.'); return; }
+  try {
+    await sendReporte(S.client, peerPubkey, m);
+    toast('Reporte enviado. Gracias por cuidar la comunidad.');
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
+}
+
+function bloquearPerfil(peerPubkey) {
+  const prof = S.perfilCache.get(peerPubkey)?.profile;
+  const nombre = prof ? prof.apodo : 'este perfil';
+  if (!confirm('¿Bloquear a ' + nombre + '? No verás más su perfil.')) return;
+  if (!S.bloqueados.includes(peerPubkey)) {
+    S.bloqueados.push(peerPubkey);
+    LS.set('bloqueados', S.bloqueados);
+  }
+  marcarVisto(peerPubkey);
+  closeDetalle();
+  toast('Perfil bloqueado.');
+  if (S.screen === 'deck' && curCand() && curCand().other.pubkey === peerPubkey) nextCard();
+  else if (S.screen === 'chat') showMatches();
+}
+
+// ---------- 5. top 10 ----------
+async function showTop10() {
+  stopChat();
+  S.screen = 'top10';
+  $('#app').innerHTML = pantallaShell('top10',
+    '<div class="deck-head"><h2>Top 10 del día</h2><p class="muted">Tu mejor compatibilidad hoy</p></div>' +
+    '<div id="top-body">' + cargandoHTML('Calculando compatibilidad…') + '</div>');
+  try {
+    const d = await ensureData();
+    S.top = topDaily(d.me, d.others, d.ctx, undefined, 10);
+    renderTop();
+  } catch {
+    $('#top-body').innerHTML = '<div class="center-pad"><p>😕 Sin conexión a los relays.</p>' +
+      '<button type="button" class="btn primary" data-act="nav-top10">Reintentar</button></div>';
+  }
+}
+
+function renderTop() {
+  const body = $('#top-body');
+  if (!body) return;
+  if (!S.top.length) {
+    body.innerHTML = '<div class="center-pad"><p>No hay candidatos hoy.<br>Completa más tu perfil para mejores resultados.</p></div>';
+    return;
+  }
+  body.innerHTML = '<div class="rows">' + S.top.map((t, i) => {
+    const p = t.other.profile;
+    return '<div class="row" data-peer="' + esc(t.other.pubkey) + '">' +
+      '<span class="rank">' + (i + 1) + '</span>' +
+      avatarImg(t.other.pubkey, p, 'avatar sm') +
+      '<div class="r-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
+      '<small class="muted">' + lugar(p) + ' · <b class="pct">' + compatPct(t.total) + '%</b></small></div>' +
+      '<button type="button" class="btn round sm dislike" data-act="top-no" title="No">✕</button>' +
+      '<button type="button" class="btn round sm like" data-act="top-si" title="Sí">♥</button>' +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+async function topAction(peerPubkey, like) {
+  const row = document.querySelector('.row[data-peer="' + CSS.escape(peerPubkey) + '"]');
+  try {
+    if (like) {
+      await sendLike(S.client, peerPubkey, {});
+      S.data.likes.sent[peerPubkey] = { tipo: '+', superlike: false, ts: Math.floor(Date.now() / 1000) };
+      if (S.data.likes.received[peerPubkey]?.tipo === '+') {
+        toast('💘 ¡Match! Ve a Matches para chatear.');
+      }
+    } else {
+      await sendDislike(S.client, peerPubkey);
+      S.data.likes.sent[peerPubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
+    }
+    marcarVisto(peerPubkey);
+    S.top = S.top.filter((t) => t.other.pubkey !== peerPubkey);
+    if (row) row.remove();
+    if (!S.top.length) renderTop();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
+}
+
+// ---------- 6. matches ----------
+async function showMatches() {
+  stopChat();
+  S.screen = 'matches';
+  $('#app').innerHTML = pantallaShell('matches',
+    '<div class="deck-head"><div><h2>Matches</h2><p class="muted">Les gustas y te gustan 💘</p></div>' +
+    '<button type="button" class="btn ghost sm" data-act="matches-actualizar">Actualizar</button></div>' +
+    '<div id="matches-body">' + cargandoHTML('Buscando matches…') + '</div>');
+  await loadMatches();
+}
+
+async function loadMatches() {
+  const body = $('#matches-body');
+  try {
+    const d = await ensureData();
+    const mutuos = mutualMatches(d.likes.sent, d.likes.received)
+      .filter((pk) => !S.bloqueados.includes(pk) && S.perfilCache.has(pk));
+    if (!body) return;
+    if (!mutuos.length) {
+      body.innerHTML = '<div class="center-pad"><p class="big">💌</p>' +
+        '<p>Aún no tienes matches.<br>Dale ♥ a perfiles en Descubrir y espera el flechazo mutuo.</p></div>';
+      return;
+    }
+    body.innerHTML = '<div class="rows">' + mutuos.map((pk) => {
+      const p = S.perfilCache.get(pk).profile;
+      const unread = (S.chats[pk] || LS.get('chats', {})[pk] || []).filter((m) => m.from === 'peer' && !m.read).length;
+      return '<div class="row">' +
+        avatarImg(pk, p, 'avatar sm') +
+        '<div class="r-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
+        '<small class="muted">' + lugar(p) + (unread ? ' · <b class="unread">' + unread + ' nuevo' + (unread > 1 ? 's' : '') + '</b>' : '') + '</small></div>' +
+        '<button type="button" class="btn primary sm" data-act="match-chatear" data-peer="' + esc(pk) + '">Chatear</button>' +
+        '</div>';
+    }).join('') + '</div>';
+  } catch {
+    if (body) body.innerHTML = '<div class="center-pad"><p>😕 Sin conexión a los relays.</p></div>';
+  }
+}
+
+// ---------- 7. chat ----------
+function chatsLS() {
+  return LS.get('chats', {});
+}
+function saveChats() {
+  LS.set('chats', S.chats);
+}
+
+async function dmToMsg(ev) {
+  const peer = ev.pubkey === S.pubkey
+    ? (ev.tags.find((t) => t[0] === 'p') || [])[1]
+    : ev.pubkey;
+  if (!peer) return null;
+  let text;
+  try { text = await S.client.decryptDM(ev); }
+  catch { return null; }
+  return {
+    peer,
+    msg: {
+      id: ev.id,
+      from: ev.pubkey === S.pubkey ? 'me' : 'peer',
+      ts: ev.created_at * 1000,
+      text,
+      read: ev.pubkey !== S.pubkey,
+    },
+  };
+}
+
+function pushMsg(peer, msg) {
+  S.chats[peer] = S.chats[peer] || [];
+  if (!S.chats[peer].some((m) => m.id === msg.id)) {
+    S.chats[peer].push(msg);
+    S.chats[peer].sort((a, b) => a.ts - b.ts);
+    saveChats();
+  }
+}
+
+function handleReceipt(peer, ev) {
+  const e = (ev.tags.find((t) => t[0] === 'e') || [])[1];
+  if (!e) return false;
+  const msgs = S.chats[peer] || [];
+  const m = msgs.find((x) => x.id === e && x.from === 'me' && !x.read);
+  if (m) { m.read = true; saveChats(); return true; }
+  return false;
+}
+
+async function syncChatHistory() {
+  const events = [];
+  const sub = S.client.subscribe([
+    { kinds: [4], '#p': [S.pubkey], limit: 200 },
+    { kinds: [4], authors: [S.pubkey], limit: 200 },
+    { kinds: [24503], '#p': [S.pubkey], limit: 200 },
+  ], (ev) => events.push(ev));
+  await sub.eose();
+  sub.unsub();
+  for (const ev of events) {
+    if (ev.kind === 4) {
+      const r = await dmToMsg(ev);
+      if (r) pushMsg(r.peer, r.msg);
+    }
+  }
+  for (const ev of events) {
+    if (ev.kind === 24503) {
+      const peer = ev.pubkey;
+      if (S.chats[peer]) handleReceipt(peer, ev);
+    }
+  }
+}
+
+function showChat(peerPubkey) {
+  stopChat();
+  const d = S.data;
+  const mutuos = d ? mutualMatches(d.likes.sent, d.likes.received) : [];
+  const prof = S.perfilCache.get(peerPubkey)?.profile;
+  const nombre = prof ? prof.apodo : peerPubkey.slice(0, 8) + '…';
+  if (!mutuos.includes(peerPubkey)) {
+    S.screen = 'chat';
+    $('#app').innerHTML = pantallaShell('matches',
+      '<div class="center-pad"><p class="big">🔒</p>' +
+      '<p>Solo puedes chatear tras un <b>match mutuo</b>.<br>Cuando a los dos les guste su perfil, el chat se abre solo.</p>' +
+      '<button type="button" class="btn primary" data-act="nav-matches">Ver matches</button></div>');
+    return;
+  }
+  S.screen = 'chat';
+  S.chatPeer = peerPubkey;
+  S.chats = chatsLS();
+  $('#app').innerHTML = pantallaShell('matches',
+    '<div class="chat-wrap">' +
+    '<div class="chat-head">' +
+    '<button type="button" class="btn ghost sm" data-act="nav-matches">←</button>' +
+    (prof ? avatarImg(peerPubkey, prof, 'avatar xs') : '') +
+    '<b class="chat-nombre">' + esc(nombre) + '</b>' +
+    '<span class="chat-acts">' +
+    '<button type="button" class="btn ghost sm" data-act="chat-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
+    '<button type="button" class="btn ghost sm" data-act="chat-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
+    '</span></div>' +
+    '<div class="chat-msgs" id="chat-msgs"></div>' +
+    '<form class="chat-form" id="chat-form">' +
+    '<input id="chat-input" type="text" placeholder="Escribe un mensaje…" autocomplete="off" maxlength="1000">' +
+    '<button type="submit" class="btn primary">Enviar</button>' +
+    '</form></div>');
+  renderMsgs();
+  (async () => {
+    try { await syncChatHistory(); } catch {}
+    if (S.chatPeer !== peerPubkey) return;
+    renderMsgs();
+    // receipts por mensajes no leídos del peer
+    const msgs = S.chats[peerPubkey] || [];
+    let changed = false;
+    for (const m of msgs) {
+      if (m.from === 'peer' && !m.read) {
+        try { S.client.sendReceipt(peerPubkey, m.id, Math.floor(m.ts / 1000)); } catch {}
+        m.read = true;
+        changed = true;
+      }
+    }
+    if (changed) { saveChats(); renderMsgs(); }
+    // en vivo
+    const since = Math.floor(Date.now() / 1000);
+    const subDM = S.client.subscribe([
+      { kinds: [4], '#p': [S.pubkey], since },
+      { kinds: [4], authors: [S.pubkey], since },
+    ], async (ev) => {
+      if (S.chatPeer !== peerPubkey) return;
+      const r = await dmToMsg(ev);
+      if (r && r.peer === peerPubkey) {
+        pushMsg(peerPubkey, r.msg);
+        renderMsgs();
+        if (r.msg.from === 'peer') {
+          try { S.client.sendReceipt(peerPubkey, r.msg.id, Math.floor(r.msg.ts / 1000)); } catch {}
+          r.msg.read = true;
+          saveChats();
+          renderMsgs();
+        }
+      }
+    });
+    const subR = S.client.subscribe(
+      [{ kinds: [24503], '#p': [S.pubkey], since }],
+      (ev) => {
+        if (S.chatPeer !== peerPubkey) return;
+        if (ev.pubkey === peerPubkey && handleReceipt(peerPubkey, ev)) renderMsgs();
+      }
+    );
+    S.chatSubs = [subDM, subR];
+  })();
+}
+
+function renderMsgs() {
+  const box = $('#chat-msgs');
+  if (!box || !S.chatPeer) return;
+  const msgs = S.chats[S.chatPeer] || [];
+  if (!msgs.length) {
+    box.innerHTML = '<p class="muted center-pad">Aún no hay mensajes.<br>¡Rompe el hielo! 🧊</p>';
+    return;
+  }
+  box.innerHTML = msgs.map((m) => {
+    const tick = m.from === 'me'
+      ? '<span class="tick' + (m.read ? ' read' : '') + '">' + (m.read ? '✓✓' : '✓') + '</span>' : '';
+    return '<div class="msg ' + m.from + '"><div class="bubble">' + esc(m.text) +
+      '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span></div></div>';
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function submitChat() {
+  const input = $('#chat-input');
+  const peer = S.chatPeer;
+  if (!input || !peer) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  try {
+    const { event } = await S.client.sendDM(peer, text);
+    pushMsg(peer, { id: event.id, from: 'me', ts: Date.now(), text, read: false });
+    renderMsgs();
+  } catch {
+    toast('No se pudo enviar. Sin conexión a los relays.');
+    input.value = text;
+  }
+}
+
+// ---------- 8. ajustes ----------
+function showAjustes() {
+  stopChat();
+  S.screen = 'ajustes';
+  const relays = S.relays || RELAYS_DEFAULT;
+  const dot = (st) => '<span class="rdot ' + (st === 'open' ? 'g' : st === 'connecting' ? 'y' : 'r') + '"></span>';
+  $('#app').innerHTML = pantallaShell('ajustes',
+    '<div class="aj-wrap"><h2>Ajustes</h2>' +
+    '<section class="aj-sec"><h3>Cuenta</h3>' +
+    '<div class="dato"><span>Usuario</span><b>@' + esc(S.username || '') + '</b></div>' +
+    '<div class="dato"><span>Identidad (npub)</span><b class="mono">' + esc((S.npub || '').slice(0, 16) + '…') + '</b></div>' +
+    '<button type="button" class="btn ghost" data-act="aj-logout">Cerrar sesión</button></div></section>' +
+    '<section class="aj-sec"><h3>Relays</h3><p class="muted small">Estado de conexión con la red:</p>' +
+    '<div id="relay-list">' + relays.map((u) =>
+      '<div class="relay-row" data-url="' + esc(u) + '">' + dot(S.relayStatus[u]) +
+      '<span class="mono small">' + esc(u.replace('wss://', '')) + '</span></div>'
+    ).join('') + '</div>' +
+    '<button type="button" class="btn ghost sm" data-act="aj-relays-reset">Restablecer relays</button></section>' +
+    '<section class="aj-sec"><h3>Datos</h3>' +
+    '<label class="check"><input type="checkbox" id="aj-datosbajos"' + (S.datosBajos ? ' checked' : '') + '> Modo datos bajos <small class="muted">(descubre menos perfiles por vez)</small></label>' +
+    '</section>' +
+    '<section class="aj-sec"><h3>Mi perfil</h3>' +
+    '<p class="muted small">' + (S.miPerfil ? esc(S.miPerfil.apodo || '') + ' · ' + completitud(S.miPerfil) + '% completo' : 'Sin perfil publicado') +
+    (S.miPerfil && S.miPerfil.oculto ? ' · <b>oculto</b>' : '') + '</p>' +
+    '<div class="row-btns">' +
+    '<button type="button" class="btn primary sm" data-act="aj-editar">Editar</button>' +
+    '<button type="button" class="btn ghost sm" data-act="aj-publicar">Publicar actualización</button>' +
+    (S.miPerfil && S.miPerfil.oculto
+      ? '<button type="button" class="btn ghost sm" data-act="aj-mostrar">Mostrar mi perfil</button>'
+      : '<button type="button" class="btn warn sm" data-act="aj-ocultar">Ocultar mi perfil</button>') +
+    '</div></section>' +
+    '<section class="aj-sec danger-zone"><h3>Zona de peligro</h3>' +
+    '<button type="button" class="btn danger sm" data-act="aj-borrar">Borrar datos locales</button>' +
+    '<p class="muted small">Borra sesión, borrador, vistos, bloqueados y chats de este teléfono. Tu perfil publicado en la red no se borra.</p>' +
+    '</section></div>');
+  const tgl = $('#aj-datosbajos');
+  if (tgl) tgl.addEventListener('change', () => {
+    S.datosBajos = tgl.checked;
+    LS.set('datosbajos', tgl.checked ? '1' : '0');
+    S.data = null; // recargar con el nuevo límite la próxima vez
+    toast(tgl.checked ? 'Modo datos bajos activado.' : 'Modo datos bajos desactivado.');
+  });
+}
+
+async function publicarActualizacion() {
+  const d = LS.get('perfil', null) || (S.miPerfil ? clone(S.miPerfil) : null);
+  if (!d) { toast('No hay perfil para publicar.'); return; }
+  const errores = validateProfile(d);
+  if (errores.length) {
+    toast('Tu perfil tiene errores: ' + errores[0]);
+    return;
+  }
+  try {
+    d.oculto = !!(S.miPerfil && S.miPerfil.oculto);
+    await publishPerfil(S.client, d);
+    S.miPerfil = clone(d);
+    LS.set('perfil', d);
+    toast('Perfil actualizado ✓');
+    showAjustes();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
+}
+
+async function toggleOculto(ocultar) {
+  if (!S.miPerfil) { toast('Primero publica tu perfil.'); return; }
+  try {
+    S.miPerfil.oculto = ocultar;
+    await publishPerfil(S.client, S.miPerfil);
+    const b = LS.get('perfil', null);
+    if (b) { b.oculto = ocultar; LS.set('perfil', b); }
+    toast(ocultar ? 'Tu perfil está oculto.' : 'Tu perfil es visible de nuevo.');
+    showAjustes();
+  } catch {
+    S.miPerfil.oculto = !ocultar;
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
+}
+
+function cerrarSesion() {
+  if (!confirm('¿Cerrar sesión en este teléfono? Tu perfil sigue publicado en la red.')) return;
+  stopChat();
+  try { if (S.client) S.client.close(); } catch {}
+  S.client = null;
+  LS.del('sesion');
+  showInicio();
+}
+
+function restablecerRelays() {
+  LS.del('relays');
+  S.relays = null;
+  S.relayStatus = {};
+  if (S.client && S.sk) {
+    try { S.client.close(); } catch {}
+    S.client = makeClient(S.sk);
+  }
+  toast('Relays restablecidos. Reconectando…');
+  showAjustes();
+}
+
+function borrarDatos() {
+  if (!confirm('¿Borrar TODOS los datos locales de CubMatch en este teléfono? (incluye tu sesión)')) return;
+  stopChat();
+  try { if (S.client) S.client.close(); } catch {}
+  S.client = null;
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith('cubmatch_')) keys.push(k);
+  }
+  keys.forEach((k) => localStorage.removeItem(k));
+  toast('Datos locales borrados.');
+  showInicio();
+}
+
+// ---------- router de acciones (delegación en #app) ----------
+const ACTIONS = {
+  'ir-inicio': () => showInicio(),
+  'ir-registro': () => showCuenta('registro'),
+  'ir-login': () => showCuenta('login'),
+  'nav-deck': () => showDeck(),
+  'nav-top10': () => showTop10(),
+  'nav-matches': () => showMatches(),
+  'nav-ajustes': () => showAjustes(),
+  'ob-atras': () => obAtras(),
+  'ob-siguiente': () => obSiguiente(),
+  'deck-si': () => doLike(false),
+  'deck-super': () => doLike(true),
+  'deck-no': () => doDislike(),
+  'deck-info': () => { const c = curCand(); if (c) showDetalle(c.other.pubkey); },
+  'deck-recargar': () => { S.data = null; S.candidatos = []; showDeck(); },
+  'detalle-cerrar': () => closeDetalle(),
+  'perfil-reportar': (el) => reportarPerfil(el.dataset.peer),
+  'perfil-bloquear': (el) => bloquearPerfil(el.dataset.peer),
+  'top-si': (el) => topAction(el.closest('.row').dataset.peer, true),
+  'top-no': (el) => topAction(el.closest('.row').dataset.peer, false),
+  'matches-actualizar': () => { S.data = null; showMatches(); },
+  'match-chatear': (el) => {
+    const ov = $('#match-overlay');
+    if (ov) ov.remove();
+    showChat(el.dataset.peer);
+  },
+  'match-seguir': () => {
+    const ov = $('#match-overlay');
+    if (ov) ov.remove();
+    nextCard();
+  },
+  'chat-reportar': (el) => reportarPerfil(el.dataset.peer),
+  'chat-bloquear': (el) => bloquearPerfil(el.dataset.peer),
+  'aj-editar': () => {
+    S.borrador = LS.get('perfil', null) || (S.miPerfil ? clone(S.miPerfil) : newProfile());
+    S.obPaso = 1;
+    showOnboarding();
+  },
+  'aj-publicar': () => publicarActualizacion(),
+  'aj-ocultar': () => toggleOculto(true),
+  'aj-mostrar': () => toggleOculto(false),
+  'aj-logout': () => cerrarSesion(),
+  'aj-relays-reset': () => restablecerRelays(),
+  'aj-borrar': () => borrarDatos(),
+};
+
+function onAppClick(e) {
+  const chip = e.target.closest('[data-chip]');
+  if (chip) { toggleChip(chip); return; }
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.act];
+  if (fn) fn(el, e);
+}
+
+// ---------- final ----------
+const VERSION = '__APP_VERSION__';
+window.__cubmatchApp = { boot, dispose, version: VERSION };
+
+// Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
+if (typeof document !== 'undefined') {
+  if (document.readyState !== 'loading') {
+    queueMicrotask(() => { try { window.__cubmatchApp.boot(); } catch {} });
+  } else {
+    document.addEventListener('DOMContentLoaded', () => { try { window.__cubmatchApp.boot(); } catch {} });
+  }
+}

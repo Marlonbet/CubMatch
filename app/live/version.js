@@ -1,0 +1,1 @@
+window.__CUBMATCH_REMOTE_VERSION="1.0.0";
