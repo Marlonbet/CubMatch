@@ -274,6 +274,11 @@ textarea { resize: vertical; }
 .count { display: block; text-align: right; font-size: 12px; color: var(--tierra-claro); margin-top: 4px; font-variant-numeric: tabular-nums; }
 .check { display: flex; align-items: center; gap: 10px; font-size: 15px; margin: 14px 0; cursor: pointer; }
 .check input { width: 22px; height: 22px; accent-color: var(--azul); }
+/* subida de foto desde la galería (v1.5.0) */
+.foto-subida { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin: -6px 0 16px; }
+.foto-preview { width: 120px; height: 120px; object-fit: cover; border-radius: var(--radio); border: 1.5px solid var(--borde-fuerte); background: var(--superficie-2); }
+.foto-btn { cursor: pointer; }
+.foto-estado { font-size: 13.5px; color: var(--tierra-claro); min-height: 1.2em; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .error-box {
   background: var(--rojo-tint); border: 1px solid var(--rojo); color: var(--rojo-txt);

@@ -25,6 +25,7 @@ import {
   PROMPTS, MAX_BIO, MAX_TAGS,
 } from './perfil.js';
 import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel, GATE_FLOOR } from './matching.js';
+import { preparePhotoBlob, uploadPhoto } from './foto.js';
 
 // ---------- utilidades ----------
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -189,6 +190,7 @@ function wireEvents() {
   root.addEventListener('click', onAppClick);
   root.addEventListener('input', onDraftInput);
   root.addEventListener('change', onDraftInput);
+  root.addEventListener('change', onFotoChange);
   root.addEventListener('submit', (e) => {
     if (e.target.id === 'cuenta-form') { e.preventDefault(); submitCuenta(); }
     else if (e.target.id === 'chat-form') { e.preventDefault(); submitChat(); }
@@ -683,6 +685,12 @@ const OB_STEPS = [
       '<p class="fld-label">Prompts (opcional)</p>' + prompts +
       field('Descríbete en 3 palabras', '<input data-f="tresPalabras" value="' + esc(d.tresPalabras) + '" placeholder="Ej: alegre, sincero, soñador">') +
       field('Foto (URL opcional)', '<input data-f="fotoURL" type="url" inputmode="url" value="' + esc(d.fotoURL) + '" placeholder="https://…">') +
+      '<div class="foto-subida">' +
+      '<img id="foto-preview" class="foto-preview" alt="Vista previa de tu foto" src="' + esc(d.fotoURL) + '"' + (d.fotoURL ? '' : ' hidden') + '>' +
+      '<label class="btn ghost foto-btn" for="foto-file">📷 Subir desde la galería</label>' +
+      '<input type="file" id="foto-file" accept="image/*" hidden>' +
+      '<small class="foto-estado" id="foto-estado" role="status"></small>' +
+      '</div>' +
       '<label class="check"><input type="checkbox" data-f="mostrarEdad"' + (d.mostrarEdad !== false ? ' checked' : '') + '> Mostrar mi edad en el perfil</label>';
   },
   // 8 Preferencias
@@ -736,6 +744,46 @@ function onDraftInput(e) {
   if (handled) {
     LS.set('perfil', S.borrador);
     updateProgress();
+  }
+}
+
+// Subida de foto desde la galería (v1.5.0): el input #foto-file no lleva
+// data-f, así que onDraftInput lo ignora y este es su flujo propio:
+// vista previa inmediata → compresión en el cliente → subida a Blossom
+// firmada con la identidad del usuario → la URL resultante cae en el
+// campo fotoURL y en el borrador (el perfil se publica como siempre,
+// solo con la URL). Si la subida falla, el campo queda como estaba.
+async function onFotoChange(e) {
+  const input = e.target;
+  if (!input || input.id !== 'foto-file') return;
+  if (S.screen !== 'onboarding' || !S.borrador || !S.sk) return;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const estado = $('#foto-estado');
+  try {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const img = $('#foto-preview');
+      if (img) { img.src = String(fr.result); img.hidden = false; }
+    };
+    fr.readAsDataURL(file);
+  } catch {}
+  if (estado) estado.textContent = 'Subiendo…';
+  try {
+    const blob = await preparePhotoBlob(file);
+    const url = await uploadPhoto(blob, S.sk);
+    const urlInput = $('input[data-f="fotoURL"]');
+    if (urlInput) urlInput.value = url;
+    S.borrador.fotoURL = url;
+    LS.set('perfil', S.borrador);
+    updateProgress();
+    const img = $('#foto-preview');
+    if (img) { img.src = url; img.hidden = false; }
+    if (estado) estado.textContent = '¡Foto subida! ✅ Ya está en tu perfil.';
+  } catch {
+    if (estado) estado.textContent = 'No se pudo subir la foto; revisa tu conexión o pega una URL.';
+  } finally {
+    input.value = ''; // permite volver a elegir el mismo archivo
   }
 }
 
@@ -1922,7 +1970,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {
