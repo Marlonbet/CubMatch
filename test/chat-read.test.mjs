@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { JSDOM } from 'jsdom';
 import { startMockRelay } from './mock-relay.mjs';
-import { NostrClient } from '../src/red.js';
+import { NostrClient, RelayPool } from '../src/red.js';
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools';
 
 // jsdom ANTES de importar app.js (el módulo toca window/document al cargarse)
@@ -38,7 +38,7 @@ const S = () => T.getS();
 test('dmToMsg: entrante y enviado importados quedan read:false; manipulado se descarta', async () => {
   const s = S();
   s.pubkey = pkB;
-  s.client = { decryptDM: async () => 'texto descifrado' };
+  s.pool = { messaging: () => ({ decryptDM: async () => 'texto descifrado' }) };
   s.chats = {};
 
   const mkDM = (sk, to, ts) =>
@@ -58,6 +58,7 @@ test('dmToMsg: entrante y enviado importados quedan read:false; manipulado se de
 test('historial: entrante queda no leído (badge) y receipt válido voltea el enviado', async () => {
   const cA = new NostrClient({ relays: RELAYS, secretKey: skA, WSImpl: WebSocket });
   const cB = new NostrClient({ relays: RELAYS, secretKey: skB, WSImpl: WebSocket });
+  const poolB = new RelayPool({ secretKey: skB, WSImpl: WebSocket, relays: { discovery: RELAYS, messaging: RELAYS } });
   cA.connect(); cB.connect();
   await wait(400);
 
@@ -68,7 +69,7 @@ test('historial: entrante queda no leído (badge) y receipt válido voltea el en
   // B importa el historial en la app
   const s = S();
   s.pubkey = pkB;
-  s.client = cB;
+  s.pool = poolB;
   s.chats = {};
   await T.syncChatHistory();
 
@@ -110,7 +111,7 @@ test('historial: entrante queda no leído (badge) y receipt válido voltea el en
   assert.equal(T.handleReceipt(pkA, bad), false, 'receipt manipulado se descarta');
   assert.equal(m2.read, false, 'el manipulado no voltea el flag');
 
-  cA.close(); cB.close();
+  cA.close(); cB.close(); poolB.shutdown();
   wss.close();
   dom.window.close();
 });

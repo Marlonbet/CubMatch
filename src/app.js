@@ -2,15 +2,17 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
-import { NostrClient, importIdentity, eventoValido } from './red.js';
+import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, eventoValido } from './red.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
   buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
 } from './cuentas.js';
 import {
-  KIND_PERFIL, RELAYS_DEFAULT,
+  KIND_PERFIL,
   parsePerfilEvent, publishPerfil, fetchPerfiles,
   sendLike, sendDislike, fetchLikes, mutualMatches, sendReporte,
+  publishIdentityDocs, sendDMRouted, setInboxStore,
+  mergePerfiles, mergeLikes,
 } from './cubmatch.js';
 import {
   newProfile, completitud, validateProfile, avatarDataURI,
@@ -66,10 +68,10 @@ const LS = {
 
 // ---------- estado global ----------
 const S = {
-  client: null, sk: null, pubkey: null, username: null, npub: null,
+  pool: null, sk: null, pubkey: null, username: null, npub: null,
   miPerfil: null, borrador: null, obPaso: 1,
   vistos: [], bloqueados: [],
-  relays: null, datosBajos: false, relayStatus: {},
+  datosBajos: false, relayStatus: {},
   data: null,            // {perfiles, likes, corpus, ctx, me}
   candidatos: [], idx: 0,
   top: [],
@@ -98,11 +100,9 @@ function toast(msg, ms) {
   S.timers.push(t);
 }
 
-// ---------- cliente Nostr ----------
-function makeClient(sk) {
-  const relays = S.relays || RELAYS_DEFAULT;
-  const client = new NostrClient({
-    relays,
+// ---------- pool de relays (lazy: sin auto-conexión) ----------
+function makePool(sk) {
+  return new RelayPool({
     secretKey: sk,
     onRelayStatus: (url, st) => {
       S.relayStatus[url] = st;
@@ -110,8 +110,20 @@ function makeClient(sk) {
       if (row) row.className = 'rdot ' + (st === 'open' ? 'g' : st === 'connecting' ? 'y' : 'r');
     },
   });
-  client.connect();
-  return client;
+}
+
+// Cada pantalla adquiere el scope de relays que necesita al entrar y lo
+// libera al salir. Refcount + gracia de 10 s: navegar rápido entre
+// pantallas del mismo scope no reconecta. El boot no conecta nada.
+let screenScope = null;
+function setScreenScope(scope) {
+  const want = scope === 'both' ? ['discovery', 'messaging'] : scope ? [scope] : [];
+  const have = screenScope === 'both' ? ['discovery', 'messaging'] : screenScope ? [screenScope] : [];
+  if (S.pool) {
+    for (const s of have) if (!want.includes(s)) S.pool.release(s);
+    for (const s of want) if (!have.includes(s)) S.pool.acquire(s);
+  }
+  screenScope = scope;
 }
 
 function stopChat() {
@@ -124,8 +136,9 @@ export function dispose() {
   for (const t of S.timers) { clearTimeout(t); clearInterval(t); }
   S.timers = [];
   stopChat();
-  try { if (S.client) S.client.close(); } catch {}
-  S.client = null;
+  setScreenScope(null);
+  try { if (S.pool) S.pool.shutdown(); } catch {}
+  S.pool = null;
 }
 
 export function boot() {
@@ -142,8 +155,9 @@ export function boot() {
   S.perfilCache = new Map();
   S.vistos = LS.get('vistos', []);
   S.bloqueados = LS.get('bloqueados', []);
-  S.relays = LS.get('relays', null);
   S.datosBajos = LS.get('datosbajos', '0') === '1';
+  // El inbox ajeno (NIP-17) se cachea en localStorage con TTL 24h.
+  setInboxStore({ get: (k) => LS.get(k, null), set: (k, v) => LS.set(k, v) });
   if (!wired) { wired = true; wireEvents(); }
   const ses = LS.get('sesion', null);
   if (ses && ses.username && ses.nsec) restoreSession(ses);
@@ -216,6 +230,7 @@ function marcarSuperlike() {
 
 // ---------- 1. inicio ----------
 function showInicio() {
+  setScreenScope(null);
   S.screen = 'inicio';
   $('#app').innerHTML =
     '<div class="screen inicio" id="pantalla-inicio">' +
@@ -231,6 +246,7 @@ function showInicio() {
 
 // ---------- 2. cuenta: registro / login ----------
 function showCuenta(modo) {
+  setScreenScope(null);
   S.screen = 'cuenta';
   S.cuentaModo = modo || 'registro';
   const reg = S.cuentaModo === 'registro';
@@ -279,13 +295,19 @@ async function submitCuenta() {
   try {
     const sk = await deriveSecretKey(username, clave);
     btn.textContent = 'Conectando a la red…';
-    const tmp = makeClient(sk);
+    const tmp = makePool(sk);
+    tmp.acquire('discovery');
+    tmp.acquire('messaging');
     try {
       const claim = await fetchUsernameClaim(tmp, username);
       if (S.cuentaModo === 'registro') {
         if (claim) throw new Error('Ese usuario ya está tomado. Prueba con otro.');
         btn.textContent = 'Reclamando tu usuario…';
-        await tmp.publish(buildClaimEvent(username));
+        await tmp.publishAll(buildClaimEvent(username));
+        // Documentos de identidad: NIP-65 (10002, mis relays) e inbox
+        // NIP-17 (10050, dónde recibo DMs). Best-effort: los fallbacks
+        // de lectura cubren si algún relay falla aquí.
+        try { await publishIdentityDocs(tmp); } catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
       } else {
         const { pubkey } = importIdentity(nsecOf(sk));
         if (!verifyCredentials(pubkey, claim)) {
@@ -293,7 +315,7 @@ async function submitCuenta() {
         }
       }
     } finally {
-      tmp.close();
+      tmp.shutdown();
     }
     btn.textContent = 'Listo ✓';
     await enterApp(username, sk);
@@ -314,8 +336,9 @@ async function enterApp(username, sk) {
   S.sk = sk;
   S.pubkey = id.pubkey;
   S.npub = id.npub;
-  if (S.client) { try { S.client.close(); } catch {} }
-  S.client = makeClient(sk);
+  if (S.pool) { try { S.pool.shutdown(); } catch {} }
+  S.pool = makePool(sk);
+  setScreenScope('discovery');
   $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Buscando tu perfil…') + '</div>';
   let mine = null;
   try { mine = await fetchMyPerfil(); } catch {}
@@ -336,7 +359,8 @@ async function restoreSession(ses) {
     S.sk = id.sk;
     S.pubkey = id.pubkey;
     S.npub = id.npub;
-    S.client = makeClient(id.sk);
+    S.pool = makePool(id.sk);
+    setScreenScope('discovery');
     $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Reconectando…') + '</div>';
     let mine = null;
     try { mine = await fetchMyPerfil(); } catch {}
@@ -359,7 +383,7 @@ function fetchMyPerfil() {
   return new Promise((resolve) => {
     let best = null;
     const vistos = new Set(); // ids ya verificados en esta suscripción
-    const sub = S.client.subscribe(
+    const sub = S.pool.discovery().subscribe(
       [{ kinds: [KIND_PERFIL], authors: [S.pubkey], limit: 1 }],
       (ev) => {
         if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
@@ -380,6 +404,7 @@ const OB_TITULOS = [
 ];
 
 function showOnboarding() {
+  setScreenScope(null);
   S.screen = 'onboarding';
   if (!S.borrador) S.borrador = LS.get('perfil', null) || newProfile();
   $('#app').innerHTML =
@@ -612,7 +637,7 @@ async function obSiguiente() {
   try {
     S.borrador.prompts = (S.borrador.prompts || []).filter((p) => p && (p.q || p.a));
     S.borrador.oculto = !!(S.miPerfil && S.miPerfil.oculto);
-    await publishPerfil(S.client, S.borrador);
+    await publishPerfilAndDocs(S.borrador);
     S.miPerfil = clone(S.borrador);
     LS.set('perfil', S.borrador);
     toast('¡Tu perfil ya está en la red! 🎉');
@@ -625,22 +650,100 @@ async function obSiguiente() {
 }
 
 // ---------- datos compartidos deck / top10 / matches ----------
-async function ensureData() {
-  if (S.data) return S.data;
-  const limit = S.datosBajos ? 120 : 400;
-  const perfiles = await fetchPerfiles(S.client, { limit, excludeSelf: S.pubkey });
+// Caché-primero + sync incremental (v1.1, fix M8): la UI muestra la caché
+// local al instante y sincroniza en segundo plano pidiendo a los relays
+// solo lo nuevo (since = última sincronización). Ahorra datos móviles.
+const LS_PERFILES = 'cache_perfiles';
+const LS_LIKES = 'cache_likes';
+const LS_SYNC_D = 'lastSync_descubrimiento';
+
+function buildDiscoveryData(me, perfiles, likes) {
   S.perfilCache = new Map(perfiles.map((p) => [p.pubkey, p]));
-  const likes = await fetchLikes(S.client, S.pubkey);
-  const me = { pubkey: S.pubkey, profile: S.miPerfil, bloqueados: S.bloqueados, vistos: S.vistos };
   const others = perfiles.map((p) => ({ pubkey: p.pubkey, profile: p.profile, created_at: p.created_at }));
   const corpus = buildCorpus([S.miPerfil, ...perfiles.map((p) => p.profile)]);
   const ctx = { corpus, likes, nowMs: Date.now() };
-  S.data = { perfiles, likes, corpus, ctx, me, others };
+  return { perfiles, likes, corpus, ctx, me, others };
+}
+
+function meCtx() {
+  return { pubkey: S.pubkey, profile: S.miPerfil, bloqueados: S.bloqueados, vistos: S.vistos };
+}
+
+async function ensureData({ force = false } = {}) {
+  if (S.data && !force) return S.data;
+  const me = meCtx();
+  if (!force) {
+    const cachedPerfiles = LS.get(LS_PERFILES, []);
+    if (cachedPerfiles.length) {
+      // Caché al instante; el resto llega en segundo plano.
+      S.data = buildDiscoveryData(me, cachedPerfiles, LS.get(LS_LIKES, { sent: {}, received: {} }));
+      syncDiscoveryBackground();
+      return S.data;
+    }
+  }
+  return refreshDiscovery(me, force);
+}
+
+async function refreshDiscovery(me, force = false) {
+  const limit = S.datosBajos ? 120 : 400;
+  const since = force ? 0 : LS.get(LS_SYNC_D, 0);
+  const t0 = Math.floor(Date.now() / 1000);
+  const [freshP, freshL] = await Promise.all([
+    fetchPerfiles(S.pool, { limit, since, excludeSelf: S.pubkey }),
+    fetchLikes(S.pool, S.pubkey, { since }),
+  ]);
+  const perfiles = force ? freshP : mergePerfiles(LS.get(LS_PERFILES, []), freshP);
+  const likes = force ? freshL : mergeLikes(LS.get(LS_LIKES, { sent: {}, received: {} }), freshL);
+  LS.set(LS_PERFILES, perfiles);
+  LS.set(LS_LIKES, likes);
+  // Solape de 120 s: si un evento nació durante el fetch, el próximo
+  // since lo vuelve a traer (el dedup por id lo absorbe).
+  LS.set(LS_SYNC_D, Math.max(0, t0 - 120));
+  S.data = buildDiscoveryData(me, perfiles, likes);
   return S.data;
+}
+
+// Sincronización en segundo plano tras mostrar la caché: actualiza S.data
+// y refresca la pantalla visible sin saltos (se conserva la posición).
+async function syncDiscoveryBackground() {
+  try {
+    await refreshDiscovery(meCtx(), false);
+    if (!S.data) return;
+    if (S.screen === 'deck') {
+      S.candidatos = rankCandidates(S.data.me, S.data.others, S.data.ctx);
+      if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1);
+      const sub = $('#deck-sub');
+      if (sub && S.candidatos.length) {
+        sub.textContent = 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length + ' · actualizado ✓';
+      }
+    } else if (S.screen === 'top10') {
+      S.top = topDaily(S.data.me, S.data.others, S.data.ctx, undefined, 10);
+      renderTop();
+    } else if (S.screen === 'matches') {
+      loadMatches();
+    }
+  } catch { /* la caché sigue visible; se reintenta en la próxima pantalla */ }
+}
+
+// "Re-descubrir" / "Actualizar": borra caché y lastSync, descarga todo.
+function forceRefresh() {
+  S.data = null;
+  LS.del(LS_PERFILES);
+  LS.del(LS_LIKES);
+  LS.del(LS_SYNC_D);
+}
+
+// Publicar perfil + documentos de identidad (10002/10050). Los documentos
+// son best-effort: si fallan, los fallbacks de lectura lo cubren.
+async function publishPerfilAndDocs(profile) {
+  await publishPerfil(S.pool, profile);
+  try { await publishIdentityDocs(S.pool); }
+  catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
 }
 
 // ---------- 4. deck ----------
 function showDeck() {
+  setScreenScope('discovery');
   stopChat();
   S.screen = 'deck';
   if (!S.miPerfil) {
@@ -731,7 +834,7 @@ async function doLike(superlike) {
   }
   setCardBusy(true);
   try {
-    await sendLike(S.client, c.other.pubkey, { superlike: !!superlike });
+    await sendLike(S.pool, c.other.pubkey, { superlike: !!superlike });
     if (superlike) marcarSuperlike();
     S.data.likes.sent[c.other.pubkey] = { tipo: '+', superlike: !!superlike, ts: Math.floor(Date.now() / 1000) };
     marcarVisto(c.other.pubkey);
@@ -749,7 +852,7 @@ async function doDislike() {
   if (!c) return;
   setCardBusy(true);
   try {
-    await sendDislike(S.client, c.other.pubkey);
+    await sendDislike(S.pool, c.other.pubkey);
     S.data.likes.sent[c.other.pubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
     marcarVisto(c.other.pubkey);
     nextCard();
@@ -827,7 +930,7 @@ async function reportarPerfil(peerPubkey) {
   const m = motivo.trim();
   if (!m) { toast('Escribe un motivo para el reporte.'); return; }
   try {
-    await sendReporte(S.client, peerPubkey, m);
+    await sendReporte(S.pool, peerPubkey, m);
     toast('Reporte enviado. Gracias por cuidar la comunidad.');
   } catch {
     toast('Sin conexión a los relays. Intenta de nuevo.');
@@ -851,6 +954,7 @@ function bloquearPerfil(peerPubkey) {
 
 // ---------- 5. top 10 ----------
 async function showTop10() {
+  setScreenScope('discovery');
   stopChat();
   S.screen = 'top10';
   $('#app').innerHTML = pantallaShell('top10',
@@ -890,13 +994,13 @@ async function topAction(peerPubkey, like) {
   const row = document.querySelector('.row[data-peer="' + CSS.escape(peerPubkey) + '"]');
   try {
     if (like) {
-      await sendLike(S.client, peerPubkey, {});
+      await sendLike(S.pool, peerPubkey, {});
       S.data.likes.sent[peerPubkey] = { tipo: '+', superlike: false, ts: Math.floor(Date.now() / 1000) };
       if (S.data.likes.received[peerPubkey]?.tipo === '+') {
         toast('💘 ¡Match! Ve a Matches para chatear.');
       }
     } else {
-      await sendDislike(S.client, peerPubkey);
+      await sendDislike(S.pool, peerPubkey);
       S.data.likes.sent[peerPubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
     }
     marcarVisto(peerPubkey);
@@ -910,6 +1014,7 @@ async function topAction(peerPubkey, like) {
 
 // ---------- 6. matches ----------
 async function showMatches() {
+  setScreenScope('discovery');
   stopChat();
   S.screen = 'matches';
   $('#app').innerHTML = pantallaShell('matches',
@@ -969,7 +1074,7 @@ async function dmToMsg(ev) {
     : ev.pubkey;
   if (!peer) return null;
   let text;
-  try { text = await S.client.decryptDM(ev); }
+  try { text = await S.pool.messaging().decryptDM(ev); }
   catch { return null; }
   return {
     peer,
@@ -1016,12 +1121,17 @@ function noLeidos(chat) {
   return (chat || []).filter((m) => m.from === 'peer' && !m.read).length;
 }
 
+// Historial incremental: pide solo lo nuevo desde el último sync
+// (cubmatch_lastSync_chat) y fusiona con S.chats (dedup por id en pushMsg).
 async function syncChatHistory() {
+  const t0 = Math.floor(Date.now() / 1000);
+  const since = LS.get('lastSync_chat', 0);
+  const f = (base) => (since > 0 ? { ...base, since } : base);
   const events = [];
-  const sub = S.client.subscribe([
-    { kinds: [4], '#p': [S.pubkey], limit: 200 },
-    { kinds: [4], authors: [S.pubkey], limit: 200 },
-    { kinds: [24503], '#p': [S.pubkey], limit: 200 },
+  const sub = S.pool.messaging().subscribe([
+    f({ kinds: [4], '#p': [S.pubkey], limit: 200 }),
+    f({ kinds: [4], authors: [S.pubkey], limit: 200 }),
+    f({ kinds: [24503], '#p': [S.pubkey], limit: 200 }),
   ], (ev) => events.push(ev));
   await sub.eose();
   sub.unsub();
@@ -1037,9 +1147,13 @@ async function syncChatHistory() {
       if (S.chats[peer]) handleReceipt(peer, ev);
     }
   }
+  // Solape de 60 s: lo que nació durante el fetch se re-trae la próxima
+  // vez (el dedup por id lo absorbe).
+  LS.set('lastSync_chat', Math.max(0, t0 - 60));
 }
 
 function showChat(peerPubkey) {
+  setScreenScope('messaging');
   stopChat();
   const d = S.data;
   const mutuos = d ? mutualMatches(d.likes.sent, d.likes.received) : [];
@@ -1081,7 +1195,7 @@ function showChat(peerPubkey) {
     let changed = false;
     for (const m of msgs) {
       if (m.from === 'peer' && !m.read) {
-        try { S.client.sendReceipt(peerPubkey, m.id, Math.floor(m.ts / 1000)); } catch {}
+        try { S.pool.messaging().sendReceipt(peerPubkey, m.id, Math.floor(m.ts / 1000)); } catch {}
         m.read = true;
         changed = true;
       }
@@ -1089,7 +1203,7 @@ function showChat(peerPubkey) {
     if (changed) { saveChats(); renderMsgs(); }
     // en vivo
     const since = Math.floor(Date.now() / 1000);
-    const subDM = S.client.subscribe([
+    const subDM = S.pool.messaging().subscribe([
       { kinds: [4], '#p': [S.pubkey], since },
       { kinds: [4], authors: [S.pubkey], since },
     ], async (ev) => {
@@ -1099,14 +1213,14 @@ function showChat(peerPubkey) {
         pushMsg(peerPubkey, r.msg);
         renderMsgs();
         if (r.msg.from === 'peer') {
-          try { S.client.sendReceipt(peerPubkey, r.msg.id, Math.floor(r.msg.ts / 1000)); } catch {}
+          try { S.pool.messaging().sendReceipt(peerPubkey, r.msg.id, Math.floor(r.msg.ts / 1000)); } catch {}
           r.msg.read = true;
           saveChats();
           renderMsgs();
         }
       }
     });
-    const subR = S.client.subscribe(
+    const subR = S.pool.messaging().subscribe(
       [{ kinds: [24503], '#p': [S.pubkey], since }],
       (ev) => {
         if (S.chatPeer !== peerPubkey) return;
@@ -1142,7 +1256,7 @@ async function submitChat() {
   if (!text) return;
   input.value = '';
   try {
-    const { event } = await S.client.sendDM(peer, text);
+    const { event } = await sendDMRouted(S.pool, peer, text);
     pushMsg(peer, { id: event.id, from: 'me', ts: Date.now(), text, read: false });
     renderMsgs();
   } catch {
@@ -1153,21 +1267,25 @@ async function submitChat() {
 
 // ---------- 8. ajustes ----------
 function showAjustes() {
+  setScreenScope('both');
   stopChat();
   S.screen = 'ajustes';
-  const relays = S.relays || RELAYS_DEFAULT;
   const dot = (st) => '<span class="rdot ' + (st === 'open' ? 'g' : st === 'connecting' ? 'y' : 'r') + '"></span>';
+  const relayRow = (u) =>
+    '<div class="relay-row" data-url="' + esc(u) + '">' + dot(S.relayStatus[u]) +
+    '<span class="mono small">' + esc(u.replace('wss://', '')) + '</span></div>';
+  const relayGroup = (titulo, urls) =>
+    '<p class="muted small"><b>' + esc(titulo) + '</b></p>' +
+    '<div class="relay-list">' + urls.map(relayRow).join('') + '</div>';
   $('#app').innerHTML = pantallaShell('ajustes',
     '<div class="aj-wrap"><h2>Ajustes</h2>' +
     '<section class="aj-sec"><h3>Cuenta</h3>' +
     '<div class="dato"><span>Usuario</span><b>@' + esc(S.username || '') + '</b></div>' +
     '<div class="dato"><span>Identidad (npub)</span><b class="mono">' + esc((S.npub || '').slice(0, 16) + '…') + '</b></div>' +
     '<button type="button" class="btn ghost" data-act="aj-logout">Cerrar sesión</button></div></section>' +
-    '<section class="aj-sec"><h3>Relays</h3><p class="muted small">Estado de conexión con la red:</p>' +
-    '<div id="relay-list">' + relays.map((u) =>
-      '<div class="relay-row" data-url="' + esc(u) + '">' + dot(S.relayStatus[u]) +
-      '<span class="mono small">' + esc(u.replace('wss://', '')) + '</span></div>'
-    ).join('') + '</div>' +
+    '<section class="aj-sec"><h3>Relays</h3><p class="muted small">Estado de conexión con la red (4 relays con roles):</p>' +
+    relayGroup('Descubrimiento — perfiles y likes', RELAYS.discovery) +
+    relayGroup('Mensajes — chat e inbox (NIP-17)', RELAYS.messaging) +
     '<button type="button" class="btn ghost sm" data-act="aj-relays-reset">Restablecer relays</button></section>' +
     '<section class="aj-sec"><h3>Datos</h3>' +
     '<label class="check"><input type="checkbox" id="aj-datosbajos"' + (S.datosBajos ? ' checked' : '') + '> Modo datos bajos <small class="muted">(descubre menos perfiles por vez)</small></label>' +
@@ -1205,7 +1323,7 @@ async function publicarActualizacion() {
   }
   try {
     d.oculto = !!(S.miPerfil && S.miPerfil.oculto);
-    await publishPerfil(S.client, d);
+    await publishPerfilAndDocs(d);
     S.miPerfil = clone(d);
     LS.set('perfil', d);
     toast('Perfil actualizado ✓');
@@ -1219,7 +1337,7 @@ async function toggleOculto(ocultar) {
   if (!S.miPerfil) { toast('Primero publica tu perfil.'); return; }
   try {
     S.miPerfil.oculto = ocultar;
-    await publishPerfil(S.client, S.miPerfil);
+    await publishPerfilAndDocs(S.miPerfil);
     const b = LS.get('perfil', null);
     if (b) { b.oculto = ocultar; LS.set('perfil', b); }
     toast(ocultar ? 'Tu perfil está oculto.' : 'Tu perfil es visible de nuevo.');
@@ -1233,19 +1351,20 @@ async function toggleOculto(ocultar) {
 function cerrarSesion() {
   if (!confirm('¿Cerrar sesión en este teléfono? Tu perfil sigue publicado en la red.')) return;
   stopChat();
-  try { if (S.client) S.client.close(); } catch {}
-  S.client = null;
+  try { if (S.pool) S.pool.shutdown(); } catch {}
+  S.pool = null;
   LS.del('sesion');
   showInicio();
 }
 
 function restablecerRelays() {
   LS.del('relays');
-  S.relays = null;
   S.relayStatus = {};
-  if (S.client && S.sk) {
-    try { S.client.close(); } catch {}
-    S.client = makeClient(S.sk);
+  if (S.pool && S.sk) {
+    try { S.pool.shutdown(); } catch {}
+    S.pool = makePool(S.sk);
+    screenScope = null;
+    setScreenScope('both');
   }
   toast('Relays restablecidos. Reconectando…');
   showAjustes();
@@ -1254,8 +1373,8 @@ function restablecerRelays() {
 function borrarDatos() {
   if (!confirm('¿Borrar TODOS los datos locales de CubMatch en este teléfono? (incluye tu sesión)')) return;
   stopChat();
-  try { if (S.client) S.client.close(); } catch {}
-  S.client = null;
+  try { if (S.pool) S.pool.shutdown(); } catch {}
+  S.pool = null;
   const keys = [];
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
@@ -1281,13 +1400,13 @@ const ACTIONS = {
   'deck-super': () => doLike(true),
   'deck-no': () => doDislike(),
   'deck-info': () => { const c = curCand(); if (c) showDetalle(c.other.pubkey); },
-  'deck-recargar': () => { S.data = null; S.candidatos = []; showDeck(); },
+  'deck-recargar': () => { forceRefresh(); S.candidatos = []; showDeck(); },
   'detalle-cerrar': () => closeDetalle(),
   'perfil-reportar': (el) => reportarPerfil(el.dataset.peer),
   'perfil-bloquear': (el) => bloquearPerfil(el.dataset.peer),
   'top-si': (el) => topAction(el.closest('.row').dataset.peer, true),
   'top-no': (el) => topAction(el.closest('.row').dataset.peer, false),
-  'matches-actualizar': () => { S.data = null; showMatches(); },
+  'matches-actualizar': () => { forceRefresh(); showMatches(); },
   'match-chatear': (el) => {
     const ov = $('#match-overlay');
     if (ov) ov.remove();

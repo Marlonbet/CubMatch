@@ -72,20 +72,23 @@ export function pickEarliestClaim(parsed) {
   return parsed.reduce((a, b) => (b.created_at < a.created_at ? b : a));
 }
 
-export async function fetchUsernameClaim(client, username) {
+export async function fetchUsernameClaim(pool, username) {
   const out = [];
   const vistos = new Set(); // ids ya verificados en esta suscripción
-  const sub = client.subscribe(
-    [{ kinds: [KIND_CLAIM], '#d': [claimTag(username)], limit: 10 }],
-    (ev) => {
-      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-      vistos.add(ev.id);
-      if (!eventoValido(ev)) { console.warn('[cubmatch] reclamo con firma inválida, descartado:', ev.id); return; }
-      const p = parseClaimEvent(ev); if (p && p.username === username) out.push(p);
-    }
-  );
-  await sub.eose();
-  sub.unsub();
+  const run = (client) => new Promise((resolve) => {
+    const sub = client.subscribe(
+      [{ kinds: [KIND_CLAIM], '#d': [claimTag(username)], limit: 10 }],
+      (ev) => {
+        if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
+        vistos.add(ev.id);
+        if (!eventoValido(ev)) { console.warn('[cubmatch] reclamo con firma inválida, descartado:', ev.id); return; }
+        const p = parseClaimEvent(ev); if (p && p.username === username) out.push(p);
+      }
+    );
+    sub.eose().then(() => { sub.unsub(); resolve(); });
+  });
+  await run(pool.discovery());
+  if (!out.length && pool.scopeDegraded('discovery')) await run(pool.messaging());
   return pickEarliestClaim(out);
 }
 

@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
 import { startMockRelay } from './mock-relay.mjs';
-import { NostrClient, eventoValido } from '../src/red.js';
+import { RelayPool, eventoValido } from '../src/red.js';
 import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools';
 import {
   KIND_PERFIL, fetchPerfiles, fetchLikes, sendLike,
@@ -19,6 +19,10 @@ import { newProfile } from '../src/perfil.js';
 
 const { wss } = startMockRelay(3311);
 const RELAYS = ['ws://127.0.0.1:3311'];
+const mkPool = (sk) => new RelayPool({
+  secretKey: sk, WSImpl: WebSocket,
+  relays: { discovery: RELAYS, messaging: RELAYS },
+});
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -80,8 +84,7 @@ test('fetchPerfiles: descarta perfil suplantado y contenido manipulado', async (
   const skA = generateSecretKey();
   const pkA = getPublicKey(skA);
   const skAtk = generateSecretKey();
-  const client = new NostrClient({ relays: RELAYS, secretKey: generateSecretKey(), WSImpl: WebSocket });
-  client.connect();
+  const pool = mkPool(generateSecretKey());
   await wait(400);
 
   // Perfil legítimo de A
@@ -101,12 +104,12 @@ test('fetchPerfiles: descarta perfil suplantado y contenido manipulado', async (
   await injectRaw(wire(tpl));
   await wait(300);
 
-  const perfiles = await fetchPerfiles(client, {});
+  const perfiles = await fetchPerfiles(pool, {});
   const apodos = perfiles.map((p) => p.profile.apodo);
   assert.ok(apodos.includes('AnaReal'), 'el perfil válido se acepta');
   assert.ok(!apodos.includes('AnaFalsa'), 'perfil suplantado descartado');
   assert.ok(!apodos.includes('AnaHackeada'), 'contenido manipulado descartado');
-  client.close();
+  pool.shutdown();
 });
 
 test('fetchLikes: descarta like forjado', async () => {
@@ -117,12 +120,11 @@ test('fetchLikes: descarta like forjado', async () => {
   const skC = generateSecretKey();
   const pkC = getPublicKey(skC);
   const skAtk = generateSecretKey();
-  const cA = new NostrClient({ relays: RELAYS, secretKey: skA, WSImpl: WebSocket });
-  const cB = new NostrClient({ relays: RELAYS, secretKey: skB, WSImpl: WebSocket });
-  cA.connect(); cB.connect();
+  const poolA = mkPool(skA);
+  const poolB = mkPool(skB);
   await wait(400);
 
-  await sendLike(cA, pkB); // like real A → B
+  await sendLike(poolA, pkB); // like real A → B
   await wait(300);
   // Like forjado: dice ser de C hacia B, firmado por el atacante.
   const forged = finalizeEvent({
@@ -134,21 +136,20 @@ test('fetchLikes: descarta like forjado', async () => {
   await injectRaw(wire(forged));
   await wait(300);
 
-  const { received } = await fetchLikes(cB, pkB);
+  const { received } = await fetchLikes(poolB, pkB);
   assert.ok(received[pkA] && received[pkA].tipo === '+', 'el like real se acepta');
   assert.ok(!received[pkC], 'el like forjado se descarta');
-  cA.close(); cB.close();
+  poolA.shutdown(); poolB.shutdown();
 });
 
 test('fetchUsernameClaim: descarta reclamo forjado con backdating', async () => {
   const skA = generateSecretKey();
   const skAtk = generateSecretKey();
   const pkAtk = getPublicKey(skAtk);
-  const client = new NostrClient({ relays: RELAYS, secretKey: skA, WSImpl: WebSocket });
-  client.connect();
+  const pool = mkPool(skA);
   await wait(400);
 
-  await client.publish(buildClaimEvent('realtest.c1'));
+  await pool.publishAll(buildClaimEvent('realtest.c1'));
   await wait(300);
   // Reclamo forjado del atacante con created_at antiquísimo: sin verificación
   // ganaría el earliest-wins y robaría el nombre (M4). La firma se rompe
@@ -158,10 +159,10 @@ test('fetchUsernameClaim: descarta reclamo forjado con backdating', async () => 
   await injectRaw(wire(forged));
   await wait(300);
 
-  const claim = await fetchUsernameClaim(client, 'realtest.c1');
+  const claim = await fetchUsernameClaim(pool, 'realtest.c1');
   assert.ok(claim, 'hay reclamo');
   assert.notEqual(claim.pubkey, pkAtk, 'el reclamo forjado no gana aunque sea "más viejo"');
   assert.equal(claim.pubkey, getPublicKey(skA), 'el reclamo válido se mantiene');
-  client.close();
+  pool.shutdown();
   wss.close();
 });

@@ -17,6 +17,19 @@ export const KIND_PRESENCE = 24501;// "en línea" (efímero, no se guarda)
 export const KIND_TYPING = 24502;  // "escribiendo…" (efímero)
 export const KIND_RECEIPT = 24503; // confirmación de lectura (se guarda)
 
+// ---- Arquitectura de relays v1.1 ----
+// Pocos relays con roles definidos (en vez de N genéricos):
+// - discovery: perfiles, likes, listas (lo público, consultado a menudo)
+// - messaging: DMs (inbox NIP-17) + respaldo de lo crítico
+export const RELAYS = {
+  discovery: ['wss://relay.damus.io', 'wss://nos.lol'],
+  messaging: ['wss://relay.primal.net', 'wss://relay.nostr.band'],
+};
+export const ALL_RELAYS = [...RELAYS.discovery, ...RELAYS.messaging];
+export const relayRole = (url) =>
+  RELAYS.discovery.includes(url) ? 'discovery'
+  : RELAYS.messaging.includes(url) ? 'messaging' : 'otro';
+
 // Verifica la firma de un evento RECIBIDO de la red, ANTES de parsearlo.
 // Usar en cada punto de ingesta (perfiles, likes, DMs, receipts, claims);
 // descartar el inválido con console.warn. Nunca lanza.
@@ -119,11 +132,15 @@ export class NostrClient {
   }
 
   _scheduleReconnect(url, attempt) {
+    const entry = this.sockets.get(url);
+    if (entry?.reconnectTimer) clearTimeout(entry.reconnectTimer);
     const delay = Math.min(30000, 2000 * Math.pow(1.5, attempt));
-    setTimeout(() => {
+    const t = setTimeout(() => {
       const e = this.sockets.get(url);
+      if (e) e.reconnectTimer = null;
       if (e && e.status !== 'open') this._connectOne(url, attempt + 1);
     }, delay);
+    if (entry) entry.reconnectTimer = t;
   }
 
   _send(url, arr) {
@@ -154,13 +171,23 @@ export class NostrClient {
     }
   }
 
-  // Publica un evento firmado en todos los relays. Resuelve cuando al menos
-  // uno lo acepta (OK true). Rechaza si todos lo rechazan o hay timeout.
-  publish(template, { timeoutMs = 12000 } = {}) {
+  // Publica un evento firmado en los relays del cliente (o un subconjunto).
+  // Resuelve cuando al menos uno lo acepta (OK true). Rechaza si todos lo
+  // rechazan, no hay destino, o hay timeout.
+  publish(template, { timeoutMs = 12000, relays } = {}) {
     const event = finalizeEvent({ created_at: Math.floor(Date.now() / 1000), ...template }, this.sk);
+    return this.publishEvent(event, { timeoutMs, relays });
+  }
+
+  // Variante con evento ya firmado (p. ej. firmado una sola vez para
+  // publicarlo por varios clientes sin generar ids duplicados).
+  publishEvent(event, { timeoutMs = 12000, relays } = {}) {
     const payload = JSON.stringify(['EVENT', event]);
-    const urls = this.relays;
+    const urls = relays && relays.length
+      ? this.relays.filter((u) => relays.includes(u))
+      : this.relays.slice();
     return new Promise((resolve, reject) => {
+      if (!urls.length) { reject(new Error('sin relays destino')); return; }
       let settled = 0, accepted = 0;
       const timer = setTimeout(() => finish(new Error('ningún relay respondió a tiempo')), timeoutMs);
       const finish = (err) => {
@@ -304,11 +331,103 @@ export class NostrClient {
     );
   }
 
+  // Cierre real: cancela reconexiones pendientes y baja los sockets.
+  // (Antes, un timer de _scheduleReconnect podía "resucitar" la conexión
+  // después de cerrar sesión.)
   close() {
-    for (const [, entry] of this.sockets) {
-      try { entry.ws?.close(); } catch {}
+    for (const [url, entry] of this.sockets) {
+      if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+      const ws = entry.ws;
+      entry.ws = null; // antes de close(): el onclose ve entry.ws !== ws y no reintenta
       entry.status = 'down';
-      entry.ws = null;
+      try { ws?.close(); } catch {}
+      this.onRelayStatus(url, 'down');
     }
+  }
+}
+
+// ---- Pool de relays con roles y conexiones lazy (v1.1) ----
+//
+// Dos clientes Nostr (uno por scope). Cada pantalla adquiere el scope que
+// necesita al entrar y lo libera al salir; con refcount + gracia de 10 s
+// la navegación rápida no reconecta. El boot no conecta nada por sí solo:
+// las suscripciones/publicaciones conectan bajo demanda si hace falta.
+export class RelayPool {
+  constructor({ secretKey, WSImpl, onRelayStatus, graceMs = 10000, relays } = {}) {
+    const r = relays || RELAYS;
+    this.roles = {
+      discovery: r.discovery.slice(),
+      messaging: r.messaging.slice(),
+    };
+    this.sk = secretKey;
+    this.pubkey = getPublicKey(secretKey);
+    const mk = (list) => new NostrClient({ relays: list, secretKey, WSImpl, onRelayStatus });
+    this.clients = { discovery: mk(this.roles.discovery), messaging: mk(this.roles.messaging) };
+    this.refs = { discovery: 0, messaging: 0 };
+    this.graceTimers = {};
+    this.graceMs = graceMs;
+  }
+
+  discovery() { return this.clients.discovery; }
+  messaging() { return this.clients.messaging; }
+
+  acquire(scope) {
+    if (!this.clients[scope]) throw new Error('scope de relays desconocido: ' + scope);
+    this.refs[scope]++;
+    if (this.graceTimers[scope]) { clearTimeout(this.graceTimers[scope]); this.graceTimers[scope] = null; }
+    this.clients[scope].connect();
+    return this.clients[scope];
+  }
+
+  release(scope) {
+    if (!this.clients[scope]) return;
+    this.refs[scope] = Math.max(0, this.refs[scope] - 1);
+    if (this.graceTimers[scope]) clearTimeout(this.graceTimers[scope]);
+    if (this.refs[scope] === 0) {
+      this.graceTimers[scope] = setTimeout(() => {
+        this.graceTimers[scope] = null;
+        if (this.refs[scope] === 0) this.clients[scope].close();
+      }, this.graceMs);
+    }
+  }
+
+  // ¿Algún relay del scope no está conectado? (para decidir fallback)
+  scopeDegraded(scope) {
+    const c = this.clients[scope];
+    return c.relays.some((u) => c.status(u) !== 'open');
+  }
+
+  // Publicación infrecuente a TODOS los relays (perfil, 10002, 10050,
+  // claims, likes, reportes). Firma una sola vez: el mismo evento viaja
+  // por ambos clientes (sin ids duplicados).
+  async publishAll(template, opts = {}) {
+    const event = finalizeEvent({ created_at: Math.floor(Date.now() / 1000), ...template }, this.sk);
+    const results = await Promise.allSettled([
+      this.clients.discovery.publishEvent(event, opts),
+      this.clients.messaging.publishEvent(event, opts),
+    ]);
+    const ok = results.find((r) => r.status === 'fulfilled');
+    if (ok) return ok.value;
+    throw (results[0].status === 'rejected' ? results[0].reason : new Error('publicación fallida'));
+  }
+
+  // DM cifrado (NIP-04) a un subconjunto de relays de messaging
+  // (típicamente el inbox del destinatario).
+  async publishDM(peerPubkey, text, targetRelays) {
+    const content = await nip04.encrypt(this.sk, peerPubkey, text);
+    return this.clients.messaging.publish(
+      { kind: KIND_DM, tags: [['p', peerPubkey]], content },
+      { relays: targetRelays && targetRelays.length ? targetRelays : undefined }
+    );
+  }
+
+  shutdown() {
+    for (const s of Object.keys(this.graceTimers)) {
+      if (this.graceTimers[s]) clearTimeout(this.graceTimers[s]);
+    }
+    this.graceTimers = {};
+    this.refs = { discovery: 0, messaging: 0 };
+    this.clients.discovery.close();
+    this.clients.messaging.close();
   }
 }
