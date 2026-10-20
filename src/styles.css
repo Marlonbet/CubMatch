@@ -506,6 +506,46 @@ textarea { resize: vertical; }
 }
 .chat-form input { flex: 1; border-radius: 999px; padding: 12px 18px; }
 .chat-form .btn { min-height: 48px; padding: 10px 20px; }
+.chat-form .chat-ico { padding: 10px 12px; font-size: 20px; border-radius: 999px; flex-shrink: 0; }
+
+/* ubicación compartida en el chat */
+.loc-card { display: flex; gap: 10px; align-items: center; }
+.loc-ico { font-size: 26px; line-height: 1; }
+.loc-card a { color: inherit; font-weight: 700; text-decoration: underline; }
+
+/* sticker en el chat: imagen con alfa, sin fondo de burbuja */
+.bubble.sticker-b { background: transparent; border: none; padding: 2px; }
+.msg-sticker { display: block; max-width: 160px; max-height: 160px; width: auto; height: auto; }
+.msg.me .bubble.sticker-b .mmeta { color: var(--tierra-claro); }
+
+/* panel de stickers */
+.sticker-panel {
+  background: var(--superficie); border-top: 1px solid var(--borde);
+  padding: 12px; max-height: 46vh; overflow-y: auto;
+}
+.stk-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.stk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; margin-top: 8px; }
+.stk-cell { position: relative; display: block; }
+.stk {
+  width: 100%; aspect-ratio: 1; padding: 6px; cursor: pointer;
+  border: 1px solid var(--borde); background: var(--superficie-2); border-radius: var(--radio-sm);
+}
+.stk img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.stk-x {
+  position: absolute; top: -6px; right: -6px; width: 24px; height: 24px;
+  border: none; border-radius: 50%; background: var(--rojo); color: #fff;
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.stk-add {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  aspect-ratio: 1; padding: 6px; text-align: center; cursor: pointer;
+  border: 1.5px dashed var(--borde-fuerte); border-radius: var(--radio-sm); color: var(--tierra-claro);
+}
+.stk-add-ico { font-size: 22px; }
+.stk-estado { font-size: 13.5px; color: var(--tierra-claro); min-height: 1.2em; margin: 8px 0 0; }
+
+/* hoja de confirmación de ubicación */
+.sheet.loc h3 { margin: 4px 0 6px; color: var(--tierra); font-size: 22px; font-weight: 800; }
 
 /* ---------- ajustes ---------- */
 .aj-wrap { padding: 20px 18px 30px; }

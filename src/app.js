@@ -26,6 +26,11 @@ import {
 } from './perfil.js';
 import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel, GATE_FLOOR } from './matching.js';
 import { preparePhotoBlob, uploadPhoto } from './foto.js';
+import {
+  parseChatPayload, buildLocPayload, buildStickerPayload, osmUrl, geoErrorTexto,
+  loadStickers, addSticker, removeSticker,
+  prepareStickerBlob, stickerPesoOk,
+} from './chatx.js';
 
 // ---------- utilidades ----------
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -84,6 +89,7 @@ const S = {
   perfilCache: new Map(),
   chats: {},             // peerPubkey -> [{id,from,ts,text,read}]
   chatPeer: null, chatSubs: [],
+  stickerEdit: false,    // panel de stickers en modo edición (borrar)
   cuentaModo: 'registro',
   infoFrom: 'inicio',
   timers: [],
@@ -159,7 +165,7 @@ export function boot() {
     sk: null, pubkey: null, username: null, npub: null,
     miPerfil: null, borrador: null, obPaso: 1,
     data: null, candidatos: [], idx: 0, leGustas: [], top: [],
-    chats: {}, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
+    chats: {}, chatPeer: null, stickerEdit: false, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
     relayStatus: {},
   });
   S.perfilCache = new Map();
@@ -191,6 +197,7 @@ function wireEvents() {
   root.addEventListener('input', onDraftInput);
   root.addEventListener('change', onDraftInput);
   root.addEventListener('change', onFotoChange);
+  root.addEventListener('change', onStickerChange);
   root.addEventListener('submit', (e) => {
     if (e.target.id === 'cuenta-form') { e.preventDefault(); submitCuenta(); }
     else if (e.target.id === 'chat-form') { e.preventDefault(); submitChat(); }
@@ -1552,6 +1559,7 @@ function showChat(peerPubkey) {
   }
   S.screen = 'chat';
   S.chatPeer = peerPubkey;
+  S.stickerEdit = false;
   S.chats = chatsLS();
   $('#app').innerHTML = pantallaShell('matches',
     '<div class="chat-wrap">' +
@@ -1564,7 +1572,10 @@ function showChat(peerPubkey) {
     '<button type="button" class="btn ghost sm" data-act="chat-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
     '</span></div>' +
     '<div class="chat-msgs" id="chat-msgs"></div>' +
+    '<div class="sticker-panel" id="sticker-panel" hidden></div>' +
     '<form class="chat-form" id="chat-form">' +
+    '<button type="button" class="btn ghost chat-ico" data-act="chat-loc" aria-label="Compartir ubicación" title="Compartir ubicación">📍</button>' +
+    '<button type="button" class="btn ghost chat-ico" data-act="chat-stickers" aria-label="Enviar un sticker" title="Stickers">😊</button>' +
     '<input id="chat-input" type="text" placeholder="Escribe un mensaje…" autocomplete="off" maxlength="1000">' +
     '<button type="submit" class="btn primary">Enviar</button>' +
     '</form></div>');
@@ -1625,10 +1636,35 @@ function renderMsgs() {
   box.innerHTML = msgs.map((m) => {
     const tick = m.from === 'me'
       ? '<span class="tick' + (m.read ? ' read' : '') + '">' + (m.read ? '✓✓' : '✓') + '</span>' : '';
-    return '<div class="msg ' + m.from + '"><div class="bubble">' + esc(m.text) +
-      '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span></div></div>';
+    const meta = '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span>';
+    // DMs especiales (v1.6.0): payloads JSON de chatx (ubicación/sticker).
+    // Si el parseo falla (JSON hostil o cliente viejo), cae a texto plano.
+    const p = parseChatPayload(m.text);
+    if (p && p.tipo === 'loc') {
+      return '<div class="msg ' + m.from + '"><div class="bubble loc-b">' +
+        '<div class="loc-card"><span class="loc-ico" aria-hidden="true">📍</span>' +
+        '<span class="loc-txt"><b>Ubicación compartida</b><br>' +
+        '<a href="' + esc(osmUrl(p.lat, p.lon)) + '" target="_blank" rel="noopener">Abrir en el mapa</a></span></div>' +
+        meta + '</div></div>';
+    }
+    if (p && p.tipo === 'sticker') {
+      return '<div class="msg ' + m.from + '"><div class="bubble sticker-b">' +
+        '<img class="msg-sticker" src="' + esc(p.url) + '" alt="Sticker" loading="lazy">' +
+        meta + '</div></div>';
+    }
+    return '<div class="msg ' + m.from + '"><div class="bubble">' + esc(m.text) + meta + '</div></div>';
   }).join('');
   box.scrollTop = box.scrollHeight;
+}
+
+// Envía un DM al peer del chat abierto (texto plano o payload especial
+// JSON) y lo pinta al momento. Lanza si los relays fallan: cada
+// llamante pone su propio mensaje de error.
+async function sendChatPayload(texto) {
+  const peer = S.chatPeer;
+  const { event } = await sendDMRouted(S.pool, peer, texto);
+  pushMsg(peer, { id: event.id, from: 'me', ts: Date.now(), text: texto, read: false });
+  renderMsgs();
 }
 
 async function submitChat() {
@@ -1639,12 +1675,149 @@ async function submitChat() {
   if (!text) return;
   input.value = '';
   try {
-    const { event } = await sendDMRouted(S.pool, peer, text);
-    pushMsg(peer, { id: event.id, from: 'me', ts: Date.now(), text, read: false });
-    renderMsgs();
+    await sendChatPayload(text);
   } catch {
     toast('No se pudo enviar. Sin conexión a los relays.');
     input.value = text;
+  }
+}
+
+// ---------- ubicación en el chat ----------
+// Compartir la ubicación es delicado (revela dónde vives): siempre
+// pasa por una confirmación dentro de la app y se pide UNA sola vez
+// con getCurrentPosition — nunca hay seguimiento en vivo.
+function chatPeerNombre() {
+  const prof = S.chatPeer ? S.perfilCache.get(S.chatPeer)?.profile : null;
+  return prof ? (prof.apodo || 'esta persona') : 'esta persona';
+}
+
+function showLocConfirm() {
+  if (!S.chatPeer) return;
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    toast('Tu navegador no tiene geolocalización.');
+    return;
+  }
+  closeLocConfirm();
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = 'loc-overlay';
+  ov.innerHTML = '<div class="sheet loc" role="dialog" aria-label="Compartir ubicación">' +
+    '<button type="button" class="x" data-act="chat-loc-no" aria-label="Cancelar">✕</button>' +
+    '<h3>📍 Compartir ubicación</h3>' +
+    '<p>¿Compartir tu ubicación <b>exacta</b> con <b>' + esc(chatPeerNombre()) + '</b>?</p>' +
+    '<p class="muted">Se enviará tu <b>ubicación actual</b>, una sola vez: no es seguimiento en vivo. ' +
+    'Piénsalo bien: compartirla puede revelar dónde vives.</p>' +
+    '<div class="share-btns">' +
+    '<button type="button" class="btn primary big" data-act="chat-loc-si">Compartir mi ubicación</button>' +
+    '<button type="button" class="btn ghost big" data-act="chat-loc-no">Cancelar</button>' +
+    '</div></div>';
+  ov.addEventListener('click', (e) => { if (e.target === ov) closeLocConfirm(); });
+  document.getElementById('app').appendChild(ov);
+}
+
+function closeLocConfirm() {
+  const ov = $('#loc-overlay');
+  if (ov) ov.remove();
+}
+
+function enviarUbicacion() {
+  closeLocConfirm();
+  if (!S.chatPeer) return;
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    toast('Tu navegador no tiene geolocalización.');
+    return;
+  }
+  toast('Obteniendo tu ubicación…');
+  try {
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          await sendChatPayload(buildLocPayload(pos.coords.latitude, pos.coords.longitude));
+        } catch {
+          toast('No se pudo enviar la ubicación. Sin conexión a los relays.');
+        }
+      },
+      (err) => toast(geoErrorTexto(err)),
+      { timeout: 15000, maximumAge: 60000 }
+    );
+  } catch {
+    toast('No se pudo obtener tu ubicación.');
+  }
+}
+
+// ---------- stickers personales en el chat ----------
+// Biblioteca local por cuenta (chatx + LS). Añadir = subir la imagen a
+// Blossom SIN recomprimir a JPEG (se conserva el alfa); enviar = DM
+// con payload {"t":"sticker",...}.
+function toggleStickerPanel() {
+  const panel = $('#sticker-panel');
+  if (!panel) return;
+  if (panel.hidden) { renderStickerPanel(); panel.hidden = false; }
+  else panel.hidden = true;
+}
+
+function renderStickerPanel() {
+  const panel = $('#sticker-panel');
+  if (!panel || !S.pubkey) return;
+  const lista = loadStickers(LS, S.pubkey);
+  panel.innerHTML =
+    '<div class="stk-head"><b>😊 Mis stickers</b>' +
+    (lista.length
+      ? '<button type="button" class="btn ghost sm" data-act="sticker-editar">' + (S.stickerEdit ? 'Listo' : 'Editar') + '</button>'
+      : '') +
+    '</div>' +
+    '<p class="muted small">¿Tus favoritos de WhatsApp? Guárdalos como imagen y súbelos aquí.</p>' +
+    '<div class="stk-grid">' +
+    lista.map((url) =>
+      '<span class="stk-cell">' +
+      '<button type="button" class="stk" data-act="sticker-send" data-url="' + esc(url) + '" aria-label="Enviar sticker">' +
+      '<img src="' + esc(url) + '" alt="" loading="lazy"></button>' +
+      (S.stickerEdit
+        ? '<button type="button" class="stk-x" data-act="sticker-del" data-url="' + esc(url) + '" aria-label="Quitar sticker">✕</button>'
+        : '') +
+      '</span>').join('') +
+    '<label class="stk-add" for="sticker-file"><span class="stk-add-ico" aria-hidden="true">➕</span><small>Añadir desde la galería</small></label>' +
+    '<input type="file" id="sticker-file" accept="image/*" hidden>' +
+    '</div>' +
+    (lista.length ? '' : '<p class="muted small">Todavía no tienes stickers: añade el primero.</p>') +
+    '<p class="stk-estado" id="sticker-estado" role="status"></p>';
+}
+
+async function enviarSticker(url) {
+  const panel = $('#sticker-panel');
+  if (panel) panel.hidden = true;
+  try {
+    await sendChatPayload(buildStickerPayload(url));
+  } catch {
+    toast('No se pudo enviar el sticker. Sin conexión a los relays.');
+  }
+}
+
+// El input #sticker-file vive dentro del panel: su change burbujea a
+// este listener propio (como el de la foto, onFotoChange).
+async function onStickerChange(e) {
+  const input = e.target;
+  if (!input || input.id !== 'sticker-file') return;
+  if (!S.sk || !S.pubkey) return;
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const estado = $('#sticker-estado');
+  if (estado) estado.textContent = 'Subiendo sticker…';
+  try {
+    const blob = await prepareStickerBlob(file);
+    if (!stickerPesoOk(blob.size)) {
+      if (estado) estado.textContent = 'Ese sticker pesa más de 1 MB; prueba con uno más ligero.';
+      return;
+    }
+    const url = await uploadPhoto(blob, S.sk);
+    addSticker(LS, S.pubkey, url);
+    renderStickerPanel();
+    const est2 = $('#sticker-estado');
+    if (est2) est2.textContent = '¡Sticker añadido! ✅';
+  } catch {
+    if (estado) estado.textContent = 'No se pudo subir el sticker; revisa tu conexión.';
+  } finally {
+    input.value = ''; // permite volver a elegir el mismo archivo
   }
 }
 
@@ -1944,6 +2117,13 @@ const ACTIONS = {
   },
   'chat-reportar': (el) => reportarPerfil(el.dataset.peer),
   'chat-bloquear': (el) => bloquearPerfil(el.dataset.peer),
+  'chat-loc': () => showLocConfirm(),
+  'chat-loc-si': () => enviarUbicacion(),
+  'chat-loc-no': () => closeLocConfirm(),
+  'chat-stickers': () => toggleStickerPanel(),
+  'sticker-send': (el) => { if (!S.stickerEdit) enviarSticker(el.dataset.url); },
+  'sticker-del': (el) => { removeSticker(LS, S.pubkey, el.dataset.url); renderStickerPanel(); },
+  'sticker-editar': () => { S.stickerEdit = !S.stickerEdit; renderStickerPanel(); },
   'aj-editar': () => {
     S.borrador = LS.get('perfil', null) || (S.miPerfil ? clone(S.miPerfil) : newProfile());
     S.obPaso = 1;
@@ -1970,7 +2150,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {
