@@ -45,6 +45,18 @@ test('bundle live: expone boot/dispose/version y arranca', () => {
   dom.window.close();
 });
 
+test('etiqueta de versión visible: la landing muestra la versión', () => {
+  const dom = mockWindow();
+  const { window } = dom;
+  window.eval(read('app/live/cubmatch-live.js'));
+  const app = window.__cubmatchApp;
+  const pkg = JSON.parse(read('package.json'));
+  app.boot();
+  const html = window.document.getElementById('app').innerHTML;
+  assert.ok(html.includes('v' + pkg.version), 'la landing muestra v' + pkg.version);
+  dom.window.close();
+});
+
 test('takeover: dispose → boot re-arranca limpio', () => {
   const dom = mockWindow();
   const { window } = dom;

@@ -234,9 +234,27 @@ textarea { resize: vertical; }
 .t-foto .avatar.big { width: 100%; height: 340px; border-radius: 0; object-fit: cover; display: block; }
 .compat {
   position: absolute; right: 14px; bottom: 14px;
-  background: var(--rojo); color: #fff; font-weight: 800; font-size: 20px;
-  border-radius: 999px; padding: 10px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  background: var(--rojo); color: #fff; font-weight: 800; font-size: 16px;
+  border-radius: 999px; padding: 9px 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
+.compat.media { background: var(--amarillo); color: #3e2723; }
+.compat.explorar { background: #8d6e63; }
+
+/* pool relajado: aviso discreto sobre el mazo */
+.relax-note { margin: 12px 14px 0; font-size: 13.5px; color: var(--tierra-claro); text-align: center; }
+
+/* fila "Le gustas" (sobre el mazo, móvil y escritorio) */
+.legustas { margin: 12px 14px 0; background: #fff8e1; border: 2px solid var(--amarillo);
+  border-radius: var(--radio); padding: 14px 16px; }
+.legustas h3 { margin: 0 0 2px; color: var(--tierra); }
+.legustas .muted { margin: 0 0 10px; font-size: 14px; }
+.lg-row { display: flex; flex-direction: column; gap: 8px; }
+.lg-card { display: flex; align-items: center; gap: 12px; background: var(--blanco);
+  border-radius: 12px; padding: 8px 12px; box-shadow: var(--sombra); }
+.lg-card .avatar { width: 48px; height: 48px; }
+.lg-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.lg-main b { color: #3e2723; }
+.lg-actions { display: flex; gap: 8px; }
 .t-body { padding: 16px 18px 6px; }
 .t-body h3 { margin: 0 0 2px; font-size: 22px; color: #3e2723; }
 .t-body .muted { margin: 0 0 8px; font-size: 14px; }

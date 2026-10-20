@@ -20,12 +20,11 @@ import {
 } from './cubmatch.js';
 import {
   newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI,
-  MIN_COMPLETITUD,
   PROVINCIAS, GENEROS, ORIENTACIONES, COMPLEXIONES, OJOS, PIEL, CABELLO,
   EDUCACION, SECTORES, VALORES, INTERESES, RASGOS, RELACIONES, DISTANCIAS,
   PROMPTS, MAX_BIO, MAX_TAGS,
 } from './perfil.js';
-import { buildCorpus, rankCandidates, topDaily } from './matching.js';
+import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel, GATE_FLOOR } from './matching.js';
 
 // ---------- utilidades ----------
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -75,10 +74,11 @@ const LS = {
 const S = {
   pool: null, sk: null, pubkey: null, username: null, npub: null,
   miPerfil: null, borrador: null, obPaso: 1,
-  vistos: [], bloqueados: [],
+  vistos: {}, bloqueados: [],
   datosBajos: false, relayStatus: {},
   data: null,            // {perfiles, likes, corpus, ctx, me}
   candidatos: [], idx: 0,
+  leGustas: [],          // fila "Le gustas": [{other, ts}]
   top: [],
   perfilCache: new Map(),
   chats: {},             // peerPubkey -> [{id,from,ts,text,read}]
@@ -157,12 +157,23 @@ export function boot() {
   Object.assign(S, {
     sk: null, pubkey: null, username: null, npub: null,
     miPerfil: null, borrador: null, obPaso: 1,
-    data: null, candidatos: [], idx: 0, top: [],
+    data: null, candidatos: [], idx: 0, leGustas: [], top: [],
     chats: {}, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
     relayStatus: {},
   });
   S.perfilCache = new Map();
-  S.vistos = LS.get('vistos', []);
+  // Vistos v2: mapa {pubkey: ts} (el ts manda para la reaparición de
+  // dislikes a los 21 días). Migración del formato viejo (array sin
+  // fechas): cada visto hereda fecha = ahora.
+  const vistosRaw = LS.get('vistos', null);
+  if (Array.isArray(vistosRaw)) {
+    const ahora = Math.floor(Date.now() / 1000);
+    S.vistos = {};
+    for (const pk of vistosRaw) S.vistos[pk] = ahora;
+    LS.set('vistos', S.vistos);
+  } else {
+    S.vistos = vistosRaw && typeof vistosRaw === 'object' ? vistosRaw : {};
+  }
   S.bloqueados = LS.get('bloqueados', []);
   S.datosBajos = LS.get('datosbajos', '0') === '1';
   // El inbox ajeno (NIP-17) se cachea en localStorage con TTL 24h.
@@ -208,9 +219,13 @@ function lugar(p) {
   if (p.provincia) bits.push(p.provincia);
   return esc(bits.join(', ') || 'Cuba');
 }
-function compatPct(total) {
-  const n = Math.round(Number(total || 0) * 100);
-  return Math.max(0, Math.min(100, n));
+// Compatibilidad visible (v2): etiqueta Alta/Media/Explorar en vez
+// de %. Los pools relajados siempre se etiquetan "Explorar".
+function compatTxt(c) {
+  return compatLabel(c.total, c.relajado);
+}
+function compatCls(c) {
+  return 'compat ' + compatTxt(c).toLowerCase();
 }
 function navHTML(active) {
   const tabs = [
@@ -231,11 +246,11 @@ function pantallaShell(active, inner) {
 function cargandoHTML(msg) {
   return '<div class="center-pad"><div class="spinner"></div><p class="muted">' + esc(msg || 'Cargando…') + '</p></div>';
 }
+// Vistos v2: mapa {pubkey: ts}; el ts (segundos) es el que usa el
+// motor para la reaparición de dislikes a los 21 días.
 function marcarVisto(pubkey) {
-  if (!S.vistos.includes(pubkey)) {
-    S.vistos.push(pubkey);
-    LS.set('vistos', S.vistos);
-  }
+  S.vistos[pubkey] = Math.floor(Date.now() / 1000);
+  LS.set('vistos', S.vistos);
 }
 function superlikeDisponible() {
   const s = LS.get('superlike', { fecha: '', n: 0 });
@@ -277,7 +292,7 @@ function showInicio() {
     '<span aria-hidden="true">·</span>' +
     '<button type="button" class="link" data-act="info-terminos">📄 Términos y privacidad</button>' +
     '</nav>' +
-    '<p class="fine">Tu identidad vive en tu teléfono.<br>Sin servidores, sin tarjeta, sin rastreo.</p>' +
+    '<p class="fine">Tu identidad vive en tu teléfono.<br>Sin servidores, sin tarjeta, sin rastreo.<br><span class="ver">v' + VERSION + '</span></p>' +
     '</div>';
   actualizarContadorRed();
 }
@@ -844,6 +859,8 @@ async function syncDiscoveryBackground() {
     if (!S.data) return;
     if (S.screen === 'deck') {
       S.candidatos = rankCandidates(S.data.me, S.data.others, S.data.ctx);
+      S.leGustas = likesYou(S.data.me, S.data.others, S.data.ctx);
+      renderLeGustas();
       if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1);
       const sub = $('#deck-sub');
       if (sub && S.candidatos.length) {
@@ -852,7 +869,7 @@ async function syncDiscoveryBackground() {
           : 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length + ' · actualizado ✓';
       }
     } else if (S.screen === 'top10') {
-      S.top = topDaily(S.data.me, S.data.others, S.data.ctx, undefined, 10);
+      S.top = topDaily(S.data.me, S.data.others, S.data.ctx, 10);
       renderTop();
     } else if (S.screen === 'matches') {
       loadMatches();
@@ -890,21 +907,24 @@ function showDeck() {
   $('#app').innerHTML = pantallaShell('deck',
     '<div class="deck-head"><div class="deck-title">' + logoSVG(30, 'deck') + '<div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div></div>' +
     '<div id="deck-guia">' + guiaHTML() + '</div>' +
+    '<div id="deck-legustas"></div>' +
     '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
   loadDeck();
 }
 
-// Guía "Completa tu perfil" + aviso de matching (<70%): se calcula con
-// la lógica de completitud de perfil.js. La tarjeta se puede descartar
-// (queda guardado) y desaparece sola al llegar a 100%; el aviso de
-// <70% es persistente mientras el perfil no entre al matching.
+// Guía "Completa tu perfil" + aviso de matching: se calcula con la
+// lógica de completitud de perfil.js. La tarjeta se puede descartar
+// (queda guardado) y desaparece sola al llegar a 100%. Desde el motor
+// v2 el perfil aparece en el mazo a partir del suelo del gate (40% de
+// completitud, GATE_FLOOR); por debajo de eso el aviso es persistente.
 function guiaHTML() {
   if (!S.miPerfil) return '';
   const pct = completitud(S.miPerfil);
+  const umbral = Math.round(GATE_FLOOR * 100);
   let html = '';
-  if (pct < MIN_COMPLETITUD) {
+  if (pct < umbral) {
     html += '<div class="banner-warn" role="alert">⚠️ <b>Tu perfil aún no aparece en el matching</b> — ' +
-      'te falta ' + (MIN_COMPLETITUD - pct) + '% para llegar al ' + MIN_COMPLETITUD + '%. ' +
+      'te falta ' + (umbral - pct) + '% para llegar al ' + umbral + '%. ' +
       '<button type="button" class="link strong" data-act="guia-ir" data-paso="1">Completar mi perfil</button></div>';
   }
   if (pct < 100 && !LS.get('guiaDescartada', false)) {
@@ -938,7 +958,9 @@ async function loadDeck() {
   try {
     const d = await ensureData();
     S.candidatos = rankCandidates(d.me, d.others, d.ctx);
+    S.leGustas = likesYou(d.me, d.others, d.ctx);
     S.idx = 0;
+    renderLeGustas();
     renderDeckBody();
   } catch {
     if (!body) return;
@@ -949,16 +971,62 @@ async function loadDeck() {
 
 function curCand() { return S.candidatos[S.idx]; }
 
+// ---------- fila "Le gustas" ----------
+// Quien ya me dio like NO compite en el mazo: aparece aquí arriba,
+// solo con los filtros duros. Like de vuelta = match seguro (el suyo
+// ya está); dislike = respondido y sale de la fila (con la regla
+// general de reaparición de dislikes a los 21 días).
+function lgCardHTML(item) {
+  const p = item.other.profile;
+  const pk = esc(item.other.pubkey);
+  return '<div class="lg-card">' +
+    avatarImg(item.other.pubkey, p, 'avatar') +
+    '<div class="lg-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
+    '<small class="muted">' + lugar(p) + '</small></div>' +
+    '<div class="lg-actions">' +
+    '<button type="button" class="btn round sm dislike" data-act="lg-no" data-peer="' + pk + '" title="No me interesa" aria-label="No me interesa">✕</button>' +
+    '<button type="button" class="btn round sm like" data-act="lg-si" data-peer="' + pk + '" title="Me gusta" aria-label="Me gusta">♥</button>' +
+    '</div></div>';
+}
+
+function renderLeGustas() {
+  const box = $('#deck-legustas');
+  if (!box) return;
+  if (!S.leGustas || !S.leGustas.length) { box.innerHTML = ''; return; }
+  box.innerHTML = '<section class="legustas" aria-label="Personas a las que les gustas">' +
+    '<h3>💘 Le gustas</h3>' +
+    '<p class="muted">Estas personas ya te dieron ♥. Si les das ♥ de vuelta, ¡es match!</p>' +
+    '<div class="lg-row">' + S.leGustas.map(lgCardHTML).join('') + '</div></section>';
+}
+
+async function lgAction(peerPubkey, like) {
+  try {
+    if (like) {
+      await sendLike(S.pool, peerPubkey, {});
+      S.data.likes.sent[peerPubkey] = { tipo: '+', superlike: false, ts: Math.floor(Date.now() / 1000) };
+    } else {
+      await sendDislike(S.pool, peerPubkey);
+      S.data.likes.sent[peerPubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
+    }
+    marcarVisto(peerPubkey);
+    S.leGustas = S.leGustas.filter((x) => x.other.pubkey !== peerPubkey);
+    renderLeGustas();
+    // Está en "Le gustas" porque ya me dio '+': mi like es match mutuo.
+    if (like) showMatchOverlay(peerPubkey);
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
+}
+
 function cardHTML(c) {
   const p = c.other.profile;
-  const pct = compatPct(c.total);
   const prompts = (p.prompts || []).filter((x) => x && x.q).slice(0, 3).map((x) =>
     '<div class="prompt"><b>' + esc(x.q) + '</b><span>' + esc(x.a || '') + '</span></div>').join('');
   const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 10)
     .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
   return '<div class="tarjeta">' +
     '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
-    '<div class="compat">' + pct + '%</div></div>' +
+    '<div class="' + compatCls(c) + '">' + compatTxt(c) + '</div></div>' +
     '<div class="t-body">' +
     '<h3>' + nombreEdad(p) + '</h3>' +
     '<p class="muted">📍 ' + lugar(p) + '</p>' +
@@ -989,13 +1057,12 @@ function renderDeckBody() {
 
 function gridCardHTML(c) {
   const p = c.other.profile;
-  const pct = compatPct(c.total);
   const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 6)
     .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
   const pk = esc(c.other.pubkey);
   return '<div class="tarjeta grid-card">' +
     '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
-    '<div class="compat">' + pct + '%</div></div>' +
+    '<div class="' + compatCls(c) + '">' + compatTxt(c) + '</div></div>' +
     '<div class="t-body">' +
     '<h3>' + nombreEdad(p) + '</h3>' +
     '<p class="muted">📍 ' + lugar(p) + '</p>' +
@@ -1011,6 +1078,13 @@ function gridCardHTML(c) {
     '</div></div>';
 }
 
+// Aviso discreto cuando el pool vino relajado (pocos candidatos:
+// se exploró más allá de las preferencias).
+function relaxNoteHTML() {
+  return S.candidatos.some((c) => c.relajado)
+    ? '<p class="relax-note">🔭 Explorando más allá de tus preferencias</p>' : '';
+}
+
 function renderGrid() {
   const body = $('#deck-body');
   if (!body) return;
@@ -1023,7 +1097,7 @@ function renderGrid() {
     return;
   }
   if (sub) sub.textContent = S.candidatos.length + (S.candidatos.length === 1 ? ' perfil para ti' : ' perfiles para ti');
-  body.innerHTML = '<div class="deck-grid">' + S.candidatos.slice(0, 12).map(gridCardHTML).join('') + '</div>';
+  body.innerHTML = relaxNoteHTML() + '<div class="deck-grid">' + S.candidatos.slice(0, 12).map(gridCardHTML).join('') + '</div>';
 }
 
 // Like/dislike/super-like desde la cuadrícula: mismo envío a la red
@@ -1068,7 +1142,7 @@ function renderCard() {
     return;
   }
   if (sub) sub.textContent = 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length;
-  body.innerHTML = cardHTML(c);
+  body.innerHTML = relaxNoteHTML() + cardHTML(c);
 }
 
 function nextCard() {
@@ -1223,7 +1297,7 @@ async function showTop10() {
     '<div id="top-body">' + cargandoHTML('Calculando compatibilidad…') + '</div>');
   try {
     const d = await ensureData();
-    S.top = topDaily(d.me, d.others, d.ctx, undefined, 10);
+    S.top = topDaily(d.me, d.others, d.ctx, 10);
     renderTop();
   } catch {
     $('#top-body').innerHTML = '<div class="center-pad"><p>😕 Sin conexión a los relays.</p>' +
@@ -1244,7 +1318,7 @@ function renderTop() {
       '<span class="rank">' + (i + 1) + '</span>' +
       avatarImg(t.other.pubkey, p, 'avatar sm') +
       '<div class="r-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
-      '<small class="muted">' + lugar(p) + ' · <b class="pct">' + compatPct(t.total) + '%</b></small></div>' +
+      '<small class="muted">' + lugar(p) + ' · <b class="pct">' + compatTxt(t) + '</b></small></div>' +
       '<button type="button" class="btn round sm dislike" data-act="top-no" title="No me interesa" aria-label="No me interesa">✕</button>' +
       '<button type="button" class="btn round sm like" data-act="top-si" title="Me gusta" aria-label="Me gusta">♥</button>' +
       '</div>';
@@ -1572,7 +1646,8 @@ function showAjustes() {
     '<section class="aj-sec danger-zone"><h3>Zona de peligro</h3>' +
     '<button type="button" class="btn danger sm" data-act="aj-borrar">Borrar datos locales</button>' +
     '<p class="muted small">Borra sesión, borrador, vistos, bloqueados y chats de este teléfono. Tu perfil publicado en la red no se borra.</p>' +
-    '</section></div>');
+    '</section>' +
+    '<p class="fine">CubMatch v' + VERSION + '</p></div>');
   const tgl = $('#aj-datosbajos');
   if (tgl) tgl.addEventListener('change', () => {
     S.datosBajos = tgl.checked;
@@ -1786,6 +1861,8 @@ const ACTIONS = {
   'grid-super': (el) => gridAction(el.dataset.peer, 'super'),
   'grid-no': (el) => gridAction(el.dataset.peer, 'no'),
   'grid-info': (el) => showDetalle(el.dataset.peer),
+  'lg-si': (el) => lgAction(el.dataset.peer, true),
+  'lg-no': (el) => lgAction(el.dataset.peer, false),
   'compartir': () => showCompartir(),
   'compartir-cerrar': () => closeCompartir(),
   'compartir-nativo': () => compartirNativo(),
@@ -1845,7 +1922,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {
