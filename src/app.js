@@ -2,7 +2,10 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
-import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, eventoValido } from './red.js';
+import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido } from './red.js';
+import {
+  passwordStrength, checkUsername, fetchNetCount, netcountFromCache, logoSVG,
+} from './ux.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
   buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
@@ -135,6 +138,9 @@ function stopChat() {
 export function dispose() {
   for (const t of S.timers) { clearTimeout(t); clearInterval(t); }
   S.timers = [];
+  for (const t of cuentaTimers) clearTimeout(t);
+  cuentaTimers = [];
+  netcountRun++; // invalida el contador en vuelo
   stopChat();
   setScreenScope(null);
   try { if (S.pool) S.pool.shutdown(); } catch {}
@@ -232,16 +238,53 @@ function marcarSuperlike() {
 function showInicio() {
   setScreenScope(null);
   S.screen = 'inicio';
+  const cached = netcountFromCache(LS.get('netcount', null), Date.now());
   $('#app').innerHTML =
     '<div class="screen inicio" id="pantalla-inicio">' +
-    '<div class="brand"><div class="logo">❤️‍🔥</div><h1>CubMatch</h1>' +
+    '<div class="brand"><div class="logo">' + logoSVG(84) + '</div><h1>CubMatch</h1>' +
     '<p class="tagline">Conoce gente en Cuba, sin intermediarios.<br>Directo, gratis y sin VPN.</p></div>' +
+    '<section class="como-funciona" aria-label="Cómo funciona">' +
+    '<h3>¿Cómo funciona?</h3>' +
+    '<ul>' +
+    '<li><span>💚</span><span><b>Sin servidores.</b> Tus datos viven en una red abierta que nadie controla ni puede apagar.</span></li>' +
+    '<li><span>🔑</span><span><b>Tú tienes la llave.</b> Tu cuenta nace en tu teléfono: sin correo, sin número, sin tarjeta.</span></li>' +
+    '<li><span>🇨🇺</span><span><b>Gratis y sin VPN.</b> Hecho para Cuba: funciona con tus datos móviles.</span></li>' +
+    '</ul>' +
+    '<details class="nostr-det"><summary>¿Qué es Nostr?</summary>' +
+    '<p>La red abierta donde vive CubMatch. Como el correo electrónico, pero sin una empresa dueña: tu identidad es una llave que solo tú tienes.</p></details>' +
+    '</section>' +
     '<div class="inicio-btns">' +
     '<button type="button" class="btn primary big" data-act="ir-registro">Crear cuenta</button>' +
     '<button type="button" class="btn ghost big" data-act="ir-login">Ya tengo cuenta</button>' +
     '</div>' +
+    '<p class="netcount" id="netcount"' + (cached != null ? '' : ' hidden') + '>' +
+    (cached != null ? '💘 Ya hay <b>' + cached + '</b> perfiles publicados en la red' : '') + '</p>' +
     '<p class="fine">Tu identidad vive en tu teléfono.<br>Sin servidores, sin tarjeta, sin rastreo.</p>' +
     '</div>';
+  actualizarContadorRed();
+}
+
+// Contador de perfiles en la red (prueba social REAL): no bloquea la
+// pantalla; usa caché de 1 h y consulta en segundo plano con un pool
+// temporal de clave desechable (solo lectura). Si falla, el contador
+// se oculta en silencio.
+let netcountRun = 0;
+async function actualizarContadorRed() {
+  const run = ++netcountRun;
+  const tmp = makePool(createIdentity('consulta').sk);
+  try {
+    tmp.acquire('discovery');
+    const n = await fetchNetCount(tmp);
+    if (run !== netcountRun || n == null || S.screen !== 'inicio') return;
+    LS.set('netcount', { n, ts: Date.now() });
+    const el = $('#netcount');
+    if (el) {
+      el.hidden = false;
+      el.innerHTML = '💘 Ya hay <b>' + n + '</b> perfiles publicados en la red';
+    }
+  } catch {} finally {
+    try { tmp.shutdown(); } catch {}
+  }
 }
 
 // ---------- 2. cuenta: registro / login ----------
@@ -255,11 +298,20 @@ function showCuenta(modo) {
     '<button type="button" class="link" data-act="ir-inicio">← Volver</button>' +
     '<h2>' + (reg ? 'Crea tu cuenta' : 'Entra a tu cuenta') + '</h2>' +
     '<p class="muted">' + (reg
-      ? 'Tu usuario se reclama en la red; tu contraseña genera tu identidad. Nadie la guarda: si la olvidas, la cuenta se pierde.'
+      ? 'Tu usuario se reclama en la red; tu contraseña genera tu identidad.'
       : 'La misma contraseña de siempre recupera tu identidad en cualquier teléfono.') + '</p>' +
+    (reg
+      ? '<div class="warn-box" role="alert"><span class="warn-ico">⚠️</span><div>' +
+        '<p><b>Sin recuperación.</b> Si olvidas tu contraseña, pierdes tu cuenta para siempre. Nadie —ni siquiera nosotros— puede devolvértela.</p>' +
+        '<label class="check-row"><input type="checkbox" id="entiendo-check"> <span>Entiendo que si olvido mi contraseña pierdo mi cuenta: nadie puede recuperarla.</span></label>' +
+        '</div></div>'
+      : '') +
     '<form id="cuenta-form" autocomplete="off">' +
-    '<label>Usuario<input name="usuario" type="text" inputmode="latin" autocapitalize="none" autocomplete="username" placeholder="ej: marlon92" required></label>' +
-    '<label>Contraseña<input name="clave" type="password" autocomplete="' + (reg ? 'new-password' : 'current-password') + '" placeholder="mínimo 8 caracteres" required></label>' +
+    '<label>Usuario<input name="usuario" id="cuenta-usuario" type="text" inputmode="latin" autocapitalize="none" autocomplete="username" placeholder="ej: marlon92" required></label>' +
+    '<div class="field-status" id="usuario-status" aria-live="polite"></div>' +
+    '<label>Contraseña<span class="pw-wrap"><input name="clave" id="cuenta-clave" type="password" autocomplete="' + (reg ? 'new-password' : 'current-password') + '" placeholder="mínimo 8 caracteres" required>' +
+    '<button type="button" class="pw-eye" data-act="toggle-clave" aria-label="Mostrar contraseña">👁️</button></span></label>' +
+    (reg ? '<div class="pw-meter" id="pw-meter" hidden><div class="pw-bar"><span id="pw-bar-fill"></span></div><small id="pw-label"></small></div>' : '') +
     '<div class="error-box" id="cuenta-error" hidden></div>' +
     '<button type="submit" class="btn primary big" id="cuenta-btn">' + (reg ? 'Crear cuenta' : 'Entrar') + '</button>' +
     '</form>' +
@@ -267,6 +319,62 @@ function showCuenta(modo) {
       ? '¿Ya tienes cuenta? <button type="button" class="link" data-act="ir-login">Entra aquí</button>'
       : '¿No tienes cuenta? <button type="button" class="link" data-act="ir-registro">Crea una</button>') + '</p>' +
     '</div></div></div>';
+  wireCuentaInputs();
+}
+
+// Validación en vivo del formulario de cuenta (no interfiere con el
+// submit: es solo feedback visual). Los timers se limpian en dispose().
+let cuentaTimers = [];
+function wireCuentaInputs() {
+  for (const t of cuentaTimers) clearTimeout(t);
+  cuentaTimers = [];
+  const form = $('#cuenta-form');
+  if (!form) return;
+  // Selectores explícitos (no acceso nombrado legacy form.x: no funciona
+  // en todos los motores y es frágil).
+  const uIn = $('#cuenta-usuario', form);
+  const cIn = $('#cuenta-clave', form);
+  const status = $('#usuario-status');
+  let checkSeq = 0;
+  if (uIn && status) {
+    uIn.addEventListener('input', () => {
+      const v = uIn.value;
+      status.className = 'field-status';
+      if (!v.trim()) { status.textContent = ''; return; }
+      let uname;
+      try { uname = normalizeUsername(v); }
+      catch { status.textContent = '⚠️ Formato: 3-20 caracteres (letras, números, . _ -)'; status.classList.add('bad'); return; }
+      status.textContent = 'Comprobando disponibilidad…';
+      for (const t of cuentaTimers) clearTimeout(t);
+      cuentaTimers = [];
+      const seq = ++checkSeq;
+      cuentaTimers.push(setTimeout(async () => {
+        const tmp = makePool(createIdentity('consulta').sk);
+        try {
+          tmp.acquire('discovery');
+          const r = await checkUsername(tmp, uname);
+          if (seq !== checkSeq || S.screen !== 'cuenta') return;
+          if (r === 'tomado') { status.textContent = '✗ Ese usuario ya está en uso'; status.classList.add('bad'); }
+          else if (r === 'sin-red') { status.textContent = 'Sin conexión para verificar ahora'; }
+          else { status.textContent = '✓ Usuario disponible'; status.classList.add('ok'); }
+        } catch { /* silencio: es solo feedback */ }
+        finally { try { tmp.shutdown(); } catch {} }
+      }, 600));
+    });
+  }
+  const meter = $('#pw-meter');
+  if (meter && cIn) {
+    cIn.addEventListener('input', () => {
+      const pw = cIn.value;
+      if (!pw) { meter.hidden = true; return; }
+      const { score, label } = passwordStrength(pw);
+      meter.hidden = false;
+      const fill = $('#pw-bar-fill');
+      const lab = $('#pw-label');
+      if (fill) { fill.style.width = ((score + 1) / 4 * 100) + '%'; fill.className = 'f' + score; }
+      if (lab) { lab.textContent = 'Contraseña ' + label; lab.className = 's' + score; }
+    });
+  }
 }
 
 function cuentaError(msg) {
@@ -279,8 +387,8 @@ function cuentaError(msg) {
 async function submitCuenta() {
   const form = $('#cuenta-form');
   const btn = $('#cuenta-btn');
-  const usuarioRaw = form.usuario.value;
-  const clave = form.clave.value;
+  const usuarioRaw = form.querySelector('[name=usuario]').value;
+  const clave = form.querySelector('[name=clave]').value;
   $('#cuenta-error').hidden = true;
   let username;
   try {
@@ -289,6 +397,13 @@ async function submitCuenta() {
   } catch (e) {
     cuentaError(e.message);
     return;
+  }
+  if (S.cuentaModo === 'registro') {
+    const chk = $('#entiendo-check');
+    if (!chk || !chk.checked) {
+      cuentaError('Marca la casilla "Entiendo…" para continuar.');
+      return;
+    }
   }
   btn.disabled = true;
   btn.textContent = 'Derivando tu identidad…';
@@ -753,7 +868,7 @@ function showDeck() {
     return;
   }
   $('#app').innerHTML = pantallaShell('deck',
-    '<div class="deck-head"><div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div>' +
+    '<div class="deck-head"><div class="deck-title">' + logoSVG(30, 'deck') + '<div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div></div>' +
     '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
   loadDeck();
 }
@@ -1390,6 +1505,15 @@ const ACTIONS = {
   'ir-inicio': () => showInicio(),
   'ir-registro': () => showCuenta('registro'),
   'ir-login': () => showCuenta('login'),
+  'toggle-clave': (el) => {
+    const wrap = el.closest('.pw-wrap');
+    const inp = wrap ? wrap.querySelector('input') : null;
+    if (!inp) return;
+    const show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    el.textContent = show ? '🙈' : '👁️';
+    el.setAttribute('aria-label', show ? 'Ocultar contraseña' : 'Mostrar contraseña');
+  },
   'nav-deck': () => showDeck(),
   'nav-top10': () => showTop10(),
   'nav-matches': () => showMatches(),
