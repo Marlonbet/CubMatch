@@ -116,3 +116,91 @@ export function logoSVG(size = 84, variant = '') {
     '</svg>'
   );
 }
+
+// ---------- compartir (v1.3.0) ----------
+// La dirección pública de la app es fija (sitio nsite): compartir es
+// simplemente repartir este enlace.
+export const APP_URL = 'https://npub1vhst3lq6z4lf50nl9e3f5xduqrhjvqt73depr8ucd3aqraypmuks7nujv2.nsite.lol/';
+export const SHARE_TEXT = '💘 Conoce gente en Cuba con CubMatch: gratis, sin servidores y sin VPN. Entra aquí:';
+
+// Enlaces de compartir listos para usar (puro y testeable).
+export function shareLinks(url = APP_URL) {
+  const texto = SHARE_TEXT + ' ' + url;
+  return {
+    url,
+    texto,
+    whatsapp: 'https://wa.me/?text=' + encodeURIComponent(texto),
+  };
+}
+
+// ---------- código QR de APP_URL ----------
+// Matriz QR (versión 5, corrección M) generada UNA vez en tiempo de
+// desarrollo y guardada como asset estático: la URL no cambia, así que
+// no hace falta ninguna librería QR en el bundle. Cada fila es una
+// cadena de 37 caracteres ('1' = módulo oscuro).
+export const QR_ROWS = [
+  '1111111011101101101111110000101111111',
+  '1000001011001101111011110110001000001',
+  '1011101000101011101110111111101011101',
+  '1011101011110101010010011111101011101',
+  '1011101001001001011110101001101011101',
+  '1000001001111001101100000100101000001',
+  '1111111010101010101010101010101111111',
+  '0000000011101011011100111000000000000',
+  '1011011101011100010111010011001001011',
+  '0110010101000111011111010010110100010',
+  '1000101010010000110000111000101011100',
+  '1101000001010000100100011100101110100',
+  '1110011010111111110100001101011010111',
+  '0100110010101101100101101101101111001',
+  '1100001011010010111111100100110010100',
+  '0110010111110010001101000010111110001',
+  '1011101001011011001011111100100101100',
+  '0000110011001010000010010111001100111',
+  '0100001110010110000011000101101010111',
+  '1111110000000101110110000000010011010',
+  '0011111110101001111111001010010110001',
+  '0011010011001000110101011000110001010',
+  '0000101011010010011001110010110100000',
+  '0110100111100100100110110100111011110',
+  '0101101111110010010010010111011110101',
+  '0011110101111000010101101111111111011',
+  '0100011000111010001101001110010100110',
+  '1010010100011010100111011000011000000',
+  '0001111100111101001111101100111110110',
+  '0000000011101011011010111011100010111',
+  '1111111011001001010010001010101010111',
+  '1000001011111001011010001000100010011',
+  '1011101001100100111001100010111111010',
+  '1011101011010100001110010011111010011',
+  '1011101010010100010010111010011011000',
+  '1000001001101010001010101111010111100',
+  '1111111011111110110110000101001010111',
+];
+
+// Renderiza la matriz como SVG nítido (fondo blanco + zona de silencio
+// de 4 módulos). Los módulos oscuros se dibujan como un solo path con
+// runs horizontales: compacto y escalable a cualquier tamaño.
+export function qrSVG(size = 180) {
+  const n = QR_ROWS.length;
+  const quiet = 4;
+  const total = n + quiet * 2;
+  let d = '';
+  for (let y = 0; y < n; y++) {
+    const row = QR_ROWS[y];
+    let x = 0;
+    while (x < n) {
+      if (row[x] === '1') {
+        let x2 = x + 1;
+        while (x2 < n && row[x2] === '1') x2++;
+        d += 'M' + (x + quiet) + ' ' + (y + quiet) + 'h' + (x2 - x) + 'v1H' + (x + quiet) + 'z';
+        x = x2;
+      } else x++;
+    }
+  }
+  const s = Math.max(80, Math.round(size || 180));
+  return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 ' + total + ' ' + total +
+    '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Código QR para abrir CubMatch">' +
+    '<rect width="' + total + '" height="' + total + '" fill="#ffffff"/>' +
+    '<path d="' + d + '" fill="#3e2723"/></svg>';
+}

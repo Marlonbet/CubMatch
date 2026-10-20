@@ -5,6 +5,7 @@
 import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido } from './red.js';
 import {
   passwordStrength, checkUsername, fetchNetCount, netcountFromCache, logoSVG,
+  APP_URL, shareLinks, qrSVG,
 } from './ux.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
@@ -18,7 +19,8 @@ import {
   mergePerfiles, mergeLikes,
 } from './cubmatch.js';
 import {
-  newProfile, completitud, validateProfile, avatarDataURI,
+  newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI,
+  MIN_COMPLETITUD,
   PROVINCIAS, GENEROS, ORIENTACIONES, COMPLEXIONES, OJOS, PIEL, CABELLO,
   EDUCACION, SECTORES, VALORES, INTERESES, RASGOS, RELACIONES, DISTANCIAS,
   PROMPTS, MAX_BIO, MAX_TAGS,
@@ -82,6 +84,7 @@ const S = {
   chats: {},             // peerPubkey -> [{id,from,ts,text,read}]
   chatPeer: null, chatSubs: [],
   cuentaModo: 'registro',
+  infoFrom: 'inicio',
   timers: [],
   screen: 'inicio',
 };
@@ -155,7 +158,7 @@ export function boot() {
     sk: null, pubkey: null, username: null, npub: null,
     miPerfil: null, borrador: null, obPaso: 1,
     data: null, candidatos: [], idx: 0, top: [],
-    chats: {}, screen: 'inicio', cuentaModo: 'registro',
+    chats: {}, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
     relayStatus: {},
   });
   S.perfilCache = new Map();
@@ -178,6 +181,13 @@ function wireEvents() {
   root.addEventListener('submit', (e) => {
     if (e.target.id === 'cuenta-form') { e.preventDefault(); submitCuenta(); }
     else if (e.target.id === 'chat-form') { e.preventDefault(); submitChat(); }
+  });
+  // Al cruzar el breakpoint de escritorio, el deck se re-renderiza
+  // (una tarjeta ⇄ cuadrícula) sin recargar datos.
+  let resizeT = null;
+  window.addEventListener('resize', () => {
+    if (resizeT) clearTimeout(resizeT);
+    resizeT = setTimeout(() => { if (S.screen === 'deck') renderDeckBody(); }, 200);
   });
 }
 
@@ -209,9 +219,10 @@ function navHTML(active) {
     ['matches', 'Matches', '💬'],
     ['ajustes', 'Ajustes', '⚙️'],
   ];
-  return '<nav class="tabnav">' + tabs.map(([id, label, ico]) =>
-    '<button type="button" class="tab' + (active === id ? ' active' : '') + '" data-act="nav-' + id + '">' +
-    '<span class="tico">' + ico + '</span><span>' + label + '</span></button>'
+  return '<nav class="tabnav" aria-label="Navegación principal">' + tabs.map(([id, label, ico]) =>
+    '<button type="button" class="tab' + (active === id ? ' active' : '') + '" data-act="nav-' + id + '"' +
+    (active === id ? ' aria-current="page"' : '') + '>' +
+    '<span class="tico" aria-hidden="true">' + ico + '</span><span>' + label + '</span></button>'
   ).join('') + '</nav>';
 }
 function pantallaShell(active, inner) {
@@ -243,6 +254,7 @@ function showInicio() {
     '<div class="screen inicio" id="pantalla-inicio">' +
     '<div class="brand"><div class="logo">' + logoSVG(84) + '</div><h1>CubMatch</h1>' +
     '<p class="tagline">Conoce gente en Cuba, sin intermediarios.<br>Directo, gratis y sin VPN.</p></div>' +
+    '<div class="inicio-logo-big" aria-hidden="true">' + logoSVG(230, 'big') + '</div>' +
     '<section class="como-funciona" aria-label="Cómo funciona">' +
     '<h3>¿Cómo funciona?</h3>' +
     '<ul>' +
@@ -256,9 +268,15 @@ function showInicio() {
     '<div class="inicio-btns">' +
     '<button type="button" class="btn primary big" data-act="ir-registro">Crear cuenta</button>' +
     '<button type="button" class="btn ghost big" data-act="ir-login">Ya tengo cuenta</button>' +
+    '<button type="button" class="btn ghost big" data-act="compartir">📤 Compartir CubMatch</button>' +
     '</div>' +
     '<p class="netcount" id="netcount"' + (cached != null ? '' : ' hidden') + '>' +
     (cached != null ? '💘 Ya hay <b>' + cached + '</b> perfiles publicados en la red' : '') + '</p>' +
+    '<nav class="foot-links" aria-label="Información">' +
+    '<button type="button" class="link" data-act="info-seguridad">🛡️ Seguridad</button>' +
+    '<span aria-hidden="true">·</span>' +
+    '<button type="button" class="link" data-act="info-terminos">📄 Términos y privacidad</button>' +
+    '</nav>' +
     '<p class="fine">Tu identidad vive en tu teléfono.<br>Sin servidores, sin tarjeta, sin rastreo.</p>' +
     '</div>';
   actualizarContadorRed();
@@ -829,7 +847,9 @@ async function syncDiscoveryBackground() {
       if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1);
       const sub = $('#deck-sub');
       if (sub && S.candidatos.length) {
-        sub.textContent = 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length + ' · actualizado ✓';
+        sub.textContent = esDesktop()
+          ? S.candidatos.length + ' perfiles para ti · actualizado ✓'
+          : 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length + ' · actualizado ✓';
       }
     } else if (S.screen === 'top10') {
       S.top = topDaily(S.data.me, S.data.others, S.data.ctx, undefined, 10);
@@ -869,8 +889,48 @@ function showDeck() {
   }
   $('#app').innerHTML = pantallaShell('deck',
     '<div class="deck-head"><div class="deck-title">' + logoSVG(30, 'deck') + '<div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div></div>' +
+    '<div id="deck-guia">' + guiaHTML() + '</div>' +
     '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
   loadDeck();
+}
+
+// Guía "Completa tu perfil" + aviso de matching (<70%): se calcula con
+// la lógica de completitud de perfil.js. La tarjeta se puede descartar
+// (queda guardado) y desaparece sola al llegar a 100%; el aviso de
+// <70% es persistente mientras el perfil no entre al matching.
+function guiaHTML() {
+  if (!S.miPerfil) return '';
+  const pct = completitud(S.miPerfil);
+  let html = '';
+  if (pct < MIN_COMPLETITUD) {
+    html += '<div class="banner-warn" role="alert">⚠️ <b>Tu perfil aún no aparece en el matching</b> — ' +
+      'te falta ' + (MIN_COMPLETITUD - pct) + '% para llegar al ' + MIN_COMPLETITUD + '%. ' +
+      '<button type="button" class="link strong" data-act="guia-ir" data-paso="1">Completar mi perfil</button></div>';
+  }
+  if (pct < 100 && !LS.get('guiaDescartada', false)) {
+    const faltan = camposFaltantes(S.miPerfil);
+    const visibles = faltan.slice(0, 6);
+    const resto = faltan.length - visibles.length;
+    html += '<section class="guia-card" id="guia-card" aria-label="Completa tu perfil">' +
+      '<button type="button" class="x guia-x" data-act="guia-cerrar" aria-label="Cerrar guía">✕</button>' +
+      '<h3>Completa tu perfil 💪</h3>' +
+      '<p class="muted">Vas por el <b>' + pct + '%</b>. Un perfil completo recibe muchos más likes.</p>' +
+      '<div class="prog"><div class="prog-fill" style="width:' + pct + '%"></div></div>' +
+      '<ul class="guia-list">' +
+      visibles.map((f) =>
+        '<li class="guia-item"><span>' + esc(f.label) + '</span>' +
+        '<button type="button" class="btn ghost sm" data-act="guia-ir" data-paso="' + f.paso + '">Completar</button></li>'
+      ).join('') +
+      (resto > 0 ? '<li class="guia-item mas"><span>…y ' + resto + ' cosa' + (resto > 1 ? 's' : '') + ' más</span></li>' : '') +
+      '</ul></section>';
+  }
+  return html;
+}
+
+function irAPasoEditor(paso) {
+  S.borrador = LS.get('perfil', null) || (S.miPerfil ? clone(S.miPerfil) : newProfile());
+  S.obPaso = Math.max(1, Math.min(8, paso || 1));
+  showOnboarding();
 }
 
 async function loadDeck() {
@@ -879,7 +939,7 @@ async function loadDeck() {
     const d = await ensureData();
     S.candidatos = rankCandidates(d.me, d.others, d.ctx);
     S.idx = 0;
-    renderCard();
+    renderDeckBody();
   } catch {
     if (!body) return;
     body.innerHTML = '<div class="center-pad"><p>😕 Sin conexión a los relays.</p>' +
@@ -908,11 +968,91 @@ function cardHTML(c) {
     (chips ? '<div class="chips static">' + chips + '</div>' : '') +
     '</div>' +
     '<div class="t-actions">' +
-    '<button type="button" class="btn round dislike" data-act="deck-no" title="No me interesa">✕</button>' +
-    '<button type="button" class="btn round info" data-act="deck-info" title="Más info">i</button>' +
-    '<button type="button" class="btn round super" data-act="deck-super"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)">⭐</button>' +
-    '<button type="button" class="btn round like" data-act="deck-si" title="Me gusta">♥</button>' +
+    '<button type="button" class="btn round dislike" data-act="deck-no" title="No me interesa" aria-label="No me interesa">✕</button>' +
+    '<button type="button" class="btn round info" data-act="deck-info" title="Más info" aria-label="Ver más información de este perfil">i</button>' +
+    '<button type="button" class="btn round super" data-act="deck-super"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)" aria-label="Super-like (1 por día)">⭐</button>' +
+    '<button type="button" class="btn round like" data-act="deck-si" title="Me gusta" aria-label="Me gusta">♥</button>' +
     '</div></div>';
+}
+
+// Escritorio (≥1024px): cuadrícula de tarjetas; móvil: una tarjeta
+// (vista swipe de siempre). Se decide en cada render, sin recargar.
+function esDesktop() {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' &&
+    window.matchMedia('(min-width: 1024px)').matches;
+}
+
+function renderDeckBody() {
+  if (esDesktop()) renderGrid();
+  else renderCard();
+}
+
+function gridCardHTML(c) {
+  const p = c.other.profile;
+  const pct = compatPct(c.total);
+  const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 6)
+    .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
+  const pk = esc(c.other.pubkey);
+  return '<div class="tarjeta grid-card">' +
+    '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
+    '<div class="compat">' + pct + '%</div></div>' +
+    '<div class="t-body">' +
+    '<h3>' + nombreEdad(p) + '</h3>' +
+    '<p class="muted">📍 ' + lugar(p) + '</p>' +
+    (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
+    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '') +
+    (chips ? '<div class="chips static">' + chips + '</div>' : '') +
+    '</div>' +
+    '<div class="t-actions">' +
+    '<button type="button" class="btn round sm dislike" data-act="grid-no" data-peer="' + pk + '" title="No me interesa" aria-label="No me interesa">✕</button>' +
+    '<button type="button" class="btn round sm info" data-act="grid-info" data-peer="' + pk + '" title="Más info" aria-label="Ver más información de este perfil">i</button>' +
+    '<button type="button" class="btn round sm super" data-act="grid-super" data-peer="' + pk + '"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)" aria-label="Super-like (1 por día)">⭐</button>' +
+    '<button type="button" class="btn round sm like" data-act="grid-si" data-peer="' + pk + '" title="Me gusta" aria-label="Me gusta">♥</button>' +
+    '</div></div>';
+}
+
+function renderGrid() {
+  const body = $('#deck-body');
+  if (!body) return;
+  const sub = $('#deck-sub');
+  if (!S.candidatos.length) {
+    if (sub) sub.textContent = 'Eso es todo por ahora.';
+    body.innerHTML = '<div class="center-pad"><p class="big">👋</p>' +
+      '<p>Ya viste todos los perfiles disponibles.<br>Vuelve más tarde o re-descubre la red.</p>' +
+      '<button type="button" class="btn primary" data-act="deck-recargar">Re-descubrir</button></div>';
+    return;
+  }
+  if (sub) sub.textContent = S.candidatos.length + (S.candidatos.length === 1 ? ' perfil para ti' : ' perfiles para ti');
+  body.innerHTML = '<div class="deck-grid">' + S.candidatos.slice(0, 12).map(gridCardHTML).join('') + '</div>';
+}
+
+// Like/dislike/super-like desde la cuadrícula: mismo envío a la red
+// que el deck de una tarjeta; la tarjeta sale de la lista al actuar.
+async function gridAction(peerPubkey, tipo) {
+  const c = S.candidatos.find((x) => x.other.pubkey === peerPubkey);
+  if (!c) return;
+  if (tipo === 'super' && !superlikeDisponible()) {
+    toast('Ya usaste tu super-like de hoy ⭐');
+    return;
+  }
+  try {
+    if (tipo === 'no') {
+      await sendDislike(S.pool, peerPubkey);
+      S.data.likes.sent[peerPubkey] = { tipo: '-', superlike: false, ts: Math.floor(Date.now() / 1000) };
+    } else {
+      await sendLike(S.pool, peerPubkey, { superlike: tipo === 'super' });
+      if (tipo === 'super') marcarSuperlike();
+      S.data.likes.sent[peerPubkey] = { tipo: '+', superlike: tipo === 'super', ts: Math.floor(Date.now() / 1000) };
+    }
+    marcarVisto(peerPubkey);
+    S.candidatos = S.candidatos.filter((x) => x.other.pubkey !== peerPubkey);
+    const mutuo = tipo !== 'no' && S.data.likes.received[peerPubkey] &&
+      S.data.likes.received[peerPubkey].tipo === '+';
+    if (mutuo) { renderGrid(); showMatchOverlay(peerPubkey); }
+    else renderGrid();
+  } catch {
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+  }
 }
 
 function renderCard() {
@@ -932,6 +1072,7 @@ function renderCard() {
 }
 
 function nextCard() {
+  if (esDesktop()) { renderGrid(); return; }
   S.idx++;
   renderCard();
 }
@@ -1011,8 +1152,8 @@ function showDetalle(peerPubkey) {
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.id = 'detalle-overlay';
-  ov.innerHTML = '<div class="sheet detalle" role="dialog">' +
-    '<button type="button" class="x" data-act="detalle-cerrar">✕</button>' +
+  ov.innerHTML = '<div class="sheet detalle" role="dialog" aria-label="Detalle del perfil">' +
+    '<button type="button" class="x" data-act="detalle-cerrar" aria-label="Cerrar detalle">✕</button>' +
     avatarImg(peerPubkey, p, 'avatar big') +
     '<h3>' + nombreEdad(p) + '</h3><p class="muted">📍 ' + lugar(p) + '</p>' +
     (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
@@ -1063,7 +1204,12 @@ function bloquearPerfil(peerPubkey) {
   marcarVisto(peerPubkey);
   closeDetalle();
   toast('Perfil bloqueado.');
-  if (S.screen === 'deck' && curCand() && curCand().other.pubkey === peerPubkey) nextCard();
+  if (S.screen === 'deck') {
+    const eraActual = curCand() && curCand().other.pubkey === peerPubkey;
+    S.candidatos = S.candidatos.filter((x) => x.other.pubkey !== peerPubkey);
+    if (esDesktop()) renderGrid();
+    else if (eraActual) { if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1); renderCard(); }
+  }
   else if (S.screen === 'chat') showMatches();
 }
 
@@ -1099,8 +1245,8 @@ function renderTop() {
       avatarImg(t.other.pubkey, p, 'avatar sm') +
       '<div class="r-main"><b>' + esc(p.apodo || '¿?') + '</b>' +
       '<small class="muted">' + lugar(p) + ' · <b class="pct">' + compatPct(t.total) + '%</b></small></div>' +
-      '<button type="button" class="btn round sm dislike" data-act="top-no" title="No">✕</button>' +
-      '<button type="button" class="btn round sm like" data-act="top-si" title="Sí">♥</button>' +
+      '<button type="button" class="btn round sm dislike" data-act="top-no" title="No me interesa" aria-label="No me interesa">✕</button>' +
+      '<button type="button" class="btn round sm like" data-act="top-si" title="Me gusta" aria-label="Me gusta">♥</button>' +
       '</div>';
   }).join('') + '</div>';
 }
@@ -1288,7 +1434,7 @@ function showChat(peerPubkey) {
   $('#app').innerHTML = pantallaShell('matches',
     '<div class="chat-wrap">' +
     '<div class="chat-head">' +
-    '<button type="button" class="btn ghost sm" data-act="nav-matches">←</button>' +
+    '<button type="button" class="btn ghost sm" data-act="nav-matches" aria-label="Volver a matches">←</button>' +
     (prof ? avatarImg(peerPubkey, prof, 'avatar xs') : '') +
     '<b class="chat-nombre">' + esc(nombre) + '</b>' +
     '<span class="chat-acts">' +
@@ -1405,6 +1551,14 @@ function showAjustes() {
     '<section class="aj-sec"><h3>Datos</h3>' +
     '<label class="check"><input type="checkbox" id="aj-datosbajos"' + (S.datosBajos ? ' checked' : '') + '> Modo datos bajos <small class="muted">(descubre menos perfiles por vez)</small></label>' +
     '</section>' +
+    '<section class="aj-sec"><h3>Compartir</h3>' +
+    '<p class="muted small">Mientras más gente conozca CubMatch, mejores matches para todos.</p>' +
+    '<button type="button" class="btn ghost" data-act="compartir">📤 Compartir CubMatch</button></section>' +
+    '<section class="aj-sec"><h3>Ayuda y legal</h3>' +
+    '<div class="row-btns">' +
+    '<button type="button" class="btn ghost sm" data-act="info-seguridad">🛡️ Seguridad</button>' +
+    '<button type="button" class="btn ghost sm" data-act="info-terminos">📄 Términos y privacidad</button>' +
+    '</div></section>' +
     '<section class="aj-sec"><h3>Mi perfil</h3>' +
     '<p class="muted small">' + (S.miPerfil ? esc(S.miPerfil.apodo || '') + ' · ' + completitud(S.miPerfil) + '% completo' : 'Sin perfil publicado') +
     (S.miPerfil && S.miPerfil.oculto ? ' · <b>oculto</b>' : '') + '</p>' +
@@ -1500,6 +1654,110 @@ function borrarDatos() {
   showInicio();
 }
 
+// ---------- compartir ----------
+function showCompartir() {
+  closeCompartir();
+  const links = shareLinks();
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = 'compartir-overlay';
+  ov.innerHTML = '<div class="sheet compartir" role="dialog" aria-label="Compartir CubMatch">' +
+    '<button type="button" class="x" data-act="compartir-cerrar" aria-label="Cerrar">✕</button>' +
+    '<h3>Comparte CubMatch 💘</h3>' +
+    '<p class="muted">Invita a tus amigos y familia: mientras más gente se sume, mejores matches para todos.</p>' +
+    '<div class="qr-box">' + qrSVG(190) + '</div>' +
+    '<p class="center small muted">Escanea el código o comparte el enlace:</p>' +
+    '<p class="mono small center share-url">' + esc(links.url) + '</p>' +
+    '<div class="share-btns">' +
+    '<button type="button" class="btn primary big" data-act="compartir-nativo">📤 Compartir…</button>' +
+    '<a class="btn wa big" href="' + esc(links.whatsapp) + '" target="_blank" rel="noopener">💬 Compartir por WhatsApp</a>' +
+    '<button type="button" class="btn ghost big" data-act="compartir-copiar">📋 Copiar enlace</button>' +
+    '</div></div>';
+  ov.addEventListener('click', (e) => { if (e.target === ov) closeCompartir(); });
+  document.getElementById('app').appendChild(ov);
+}
+function closeCompartir() {
+  const ov = $('#compartir-overlay');
+  if (ov) ov.remove();
+}
+
+async function compartirNativo() {
+  const links = shareLinks();
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    try {
+      await navigator.share({ title: 'CubMatch', text: links.texto, url: links.url });
+      return;
+    } catch { return; /* el usuario canceló el diálogo */ }
+  }
+  await copiarEnlace();
+}
+
+async function copiarEnlace() {
+  const links = shareLinks();
+  try {
+    await navigator.clipboard.writeText(links.url);
+    toast('Enlace copiado ✓ ¡Compártelo donde quieras!');
+  } catch {
+    toast('Copia el enlace: ' + links.url);
+  }
+}
+
+// ---------- páginas de información: seguridad / términos ----------
+const SEGURIDAD_HTML =
+  '<p>CubMatch no tiene una empresa detrás vigilando: la seguridad la hacemos entre todos. Aquí está lo que puedes hacer tú, sin rodeos.</p>' +
+  '<h3>🚩 Cómo reportar un perfil</h3>' +
+  '<p>En el detalle de cualquier perfil (botón <b>i</b> en Descubrir) y también desde el chat, tienes el botón <b>Reportar</b>. Al reportar:</p>' +
+  '<ul>' +
+  '<li>Se publica un <b>reporte firmado en la red</b> (un aviso público que queda registrado y que cualquiera puede consultar).</li>' +
+  '<li>Tu reporte ayuda a que la comunidad sepa qué cuentas son falsas, acosadoras o peligrosas.</li>' +
+  '<li>Reportar no borra la cuenta de nadie al instante: no hay un jefe que la apague. Por eso reporta <b>y</b> bloquea.</li>' +
+  '</ul>' +
+  '<h3>🚫 Cómo bloquear</h3>' +
+  '<p>El botón <b>Bloquear</b> (en el detalle del perfil o en el chat) hace efecto <b>al momento y en tu teléfono</b>: esa persona desaparece de tu Descubrir, de tus matches y no vuelve a aparecerte. Nadie le avisa que la bloqueaste.</p>' +
+  '<h3>🤝 Sin moderación central (la verdad)</h3>' +
+  '<p>No hay un equipo de moderación revisando perfiles ni mensajes: CubMatch funciona sin servidores, así que <b>nadie puede leer tus chats ni borrar cuentas ajenas</b>. La protección real es la combinación de reportes públicos + bloqueos + tu criterio. Si un perfil te parece falso o peligroso, no arriesgues: bloquea.</p>' +
+  '<h3>💡 Consejos para conocer gente</h3>' +
+  '<ul>' +
+  '<li>Primera cita siempre en un <b>lugar público</b> y con gente alrededor (un parque, una cafetería, el malecón).</li>' +
+  '<li><b>Avisa a un amigo o familiar</b> con quién vas, dónde y a qué hora piensas volver.</li>' +
+  '<li>No compartas tu dirección exacta, datos de dinero ni contraseñas con nadie que acabas de conocer.</li>' +
+  '<li>Ve por tu cuenta: ten tu propio transporte o dinero para regresar.</li>' +
+  '<li>Si algo te da mala espina, aunque no sepas por qué, <b>cancela la cita</b>. Tu seguridad vale más que un match.</li>' +
+  '</ul>';
+
+const TERMINOS_HTML =
+  '<p>En palabras simples: esto es lo que aceptas al usar CubMatch.</p>' +
+  '<h3>🔞 Solo mayores de 18 años</h3>' +
+  '<p>CubMatch es una app de citas <b>solo para personas de 18 años o más</b>. Si eres menor, no la uses.</p>' +
+  '<h3>🗄️ Tus datos: no hay servidores</h3>' +
+  '<p>CubMatch no guarda tus datos en ningún servidor ni empresa. Tu perfil se publica en la <b>red abierta Nostr</b> y, por diseño, es <b>público</b>: cualquiera puede verlo, igual que una publicación abierta en internet. No pongas en tu perfil nada que no quieras que el mundo vea (dirección exacta, documentos, datos de menores, etc.).</p>' +
+  '<h3>🔒 Lo que sí va cifrado</h3>' +
+  '<p>Los <b>mensajes de chat</b> (que solo existen tras un match mutuo) viajan <b>cifrados</b>: solo tú y la otra persona pueden leerlos. Ni los relays que los transportan pueden abrirlos.</p>' +
+  '<h3>🗑️ La realidad del borrado</h3>' +
+  '<p>Puedes ocultar tu perfil y solicitar su borrado, y la app lo retira de los relays que conoce. Pero la red funciona con <b>copias repartidas</b>: relays de terceros que ya copiaron tu perfil pueden conservarlo un tiempo (o indefinidamente) fuera de nuestro alcance. Piensa antes de publicar: en una red abierta, <b>borrar del todo no se puede garantizar</b>.</p>' +
+  '<h3>🔑 Tu contraseña es tu cuenta</h3>' +
+  '<p>No hay recuperación de contraseña: si la olvidas, pierdes la cuenta y nadie puede devolvértela. Guárdala en un lugar seguro.</p>' +
+  '<h3>⚖️ Sin garantías</h3>' +
+  '<p>CubMatch es un proyecto comunitario y gratuito: se ofrece "tal cual", sin garantías de disponibilidad ni de resultados. Tú eres responsable de tus encuentros fuera de la app; lee la sección de <button type="button" class="link inline" data-act="info-seguridad">Seguridad</button> y cuídate.</p>' +
+  '<p>¿Quieres entender la parte técnica sin tecnicismos? Mira <button type="button" class="link inline" data-act="info-como">¿Cómo funciona?</button> en la pantalla de inicio.</p>';
+
+function showInfo(kind) {
+  stopChat();
+  const from = S.screen === 'ajustes' ? 'ajustes' : 'inicio';
+  S.infoFrom = from;
+  S.screen = 'info';
+  setScreenScope(null);
+  const titulo = kind === 'seguridad' ? '🛡️ Seguridad' : '📄 Términos y privacidad';
+  const inner = '<div class="info-wrap">' +
+    '<button type="button" class="link" data-act="info-volver">← Volver</button>' +
+    '<h2>' + titulo + '</h2>' +
+    (kind === 'seguridad' ? SEGURIDAD_HTML : TERMINOS_HTML) +
+    '</div>';
+  $('#app').innerHTML = from === 'ajustes'
+    ? pantallaShell('ajustes', inner)
+    : '<div class="screen"><div class="scroll">' + inner + '</div></div>';
+}
+
 // ---------- router de acciones (delegación en #app) ----------
 const ACTIONS = {
   'ir-inicio': () => showInicio(),
@@ -1518,6 +1776,24 @@ const ACTIONS = {
   'nav-top10': () => showTop10(),
   'nav-matches': () => showMatches(),
   'nav-ajustes': () => showAjustes(),
+  'guia-ir': (el) => irAPasoEditor(Number(el.dataset.paso) || 1),
+  'guia-cerrar': () => {
+    LS.set('guiaDescartada', true);
+    const card = $('#guia-card');
+    if (card) card.remove();
+  },
+  'grid-si': (el) => gridAction(el.dataset.peer, 'si'),
+  'grid-super': (el) => gridAction(el.dataset.peer, 'super'),
+  'grid-no': (el) => gridAction(el.dataset.peer, 'no'),
+  'grid-info': (el) => showDetalle(el.dataset.peer),
+  'compartir': () => showCompartir(),
+  'compartir-cerrar': () => closeCompartir(),
+  'compartir-nativo': () => compartirNativo(),
+  'compartir-copiar': () => copiarEnlace(),
+  'info-seguridad': () => showInfo('seguridad'),
+  'info-terminos': () => showInfo('terminos'),
+  'info-volver': () => (S.infoFrom === 'ajustes' ? showAjustes() : showInicio()),
+  'info-como': () => showInicio(),
   'ob-atras': () => obAtras(),
   'ob-siguiente': () => obSiguiente(),
   'deck-si': () => doLike(false),

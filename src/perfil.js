@@ -151,6 +151,45 @@ export function entraEnMatching(p) {
   return completitud(p) >= MIN_COMPLETITUD;
 }
 
+// ¿Aporta puntos este campo? Mismos criterios que completitud().
+function campoLleno(p, campo) {
+  if (!p) return false;
+  if (campo === 'prefs') return prefsLleno(p.prefs);
+  if (campo === 'rasgos') return rasgosLlenos(p.rasgos);
+  if (campo === 'prompts') return !!(p.prompts && p.prompts.some((x) => x.q && x.a));
+  return lleno(p[campo]);
+}
+
+// Catálogo de campos para la guía "Completa tu perfil":
+// [campo, etiqueta amable, paso del editor de perfil (1-8)].
+const FALTANTES_META = [
+  ['apodo', 'Tu apodo', 1], ['edad', 'Tu edad', 1], ['genero', 'Tu género', 1],
+  ['orientacion', 'Tu orientación', 1], ['provincia', 'Tu provincia', 1], ['municipio', 'Tu municipio', 1],
+  ['estatura', 'Tu estatura', 2], ['complexion', 'Tu complexión', 2], ['ojos', 'Tu color de ojos', 2],
+  ['piel', 'Tu piel', 2], ['cabello', 'Tu cabello', 2],
+  ['educacion', 'Tu educación', 3], ['profesion', 'Tu profesión u oficio', 3], ['sector', 'Tu sector de trabajo', 3],
+  ['fumador', 'Si fumas', 4], ['bebedor', 'Si bebes', 4], ['deporte', 'Si haces deporte', 4],
+  ['religion', 'Tu religión o creencia', 4], ['hijosTiene', 'Si tienes hijos', 4],
+  ['hijosQuiere', 'Si quieres hijos', 4], ['mascotas', 'Si tienes mascotas', 4],
+  ['valores', 'Tus valores', 5], ['rasgos', 'Tus rasgos de personalidad', 5],
+  ['intereses', 'Tus intereses', 6], ['tags', 'Tus tags libres', 6],
+  ['bio', 'Tu bio', 7], ['prompts', 'Un prompt respondido', 7],
+  ['tresPalabras', 'Tu descripción en 3 palabras', 7], ['fotoURL', 'Tu foto', 7],
+  ['prefs', 'Tus preferencias de pareja', 8],
+];
+
+const PESO_DE = Object.fromEntries(PESOS);
+
+// Campos que faltan por completar: [{campo, label, paso, peso}],
+// ordenados por peso descendente (lo que más suma va primero).
+export function camposFaltantes(p) {
+  if (!p) return [];
+  return FALTANTES_META
+    .filter(([campo]) => !campoLleno(p, campo))
+    .map(([campo, label, paso]) => ({ campo, label, paso, peso: PESO_DE[campo] || 0 }))
+    .sort((a, b) => b.peso - a.peso);
+}
+
 // Validación de campos obligatorios para publicar.
 export function validateProfile(p) {
   const errores = [];
