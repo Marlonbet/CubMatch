@@ -182,12 +182,12 @@ test('uploadPhoto: éxito en el primario, auth BUD-02 correcta y espejo al segun
     { server: 'https://cdn.hzrd149.com', json: { url: 'https://cdn.hzrd149.com/' + SHA_ABC + '.jpg' } },
   ]);
   const url = await uploadPhoto(fotoBlob(), sk, { fetchImpl, nowSec: NOW });
-  assert.equal(url, 'https://nostr.download/' + SHA_ABC + '.jpg');
+  assert.equal(url, 'https://cdn.hzrd149.com/' + SHA_ABC + '.jpg');
   await wait(10); // deja correr el espejo (best-effort, sin await)
 
   assert.equal(fetchImpl.calls.length, 2, 'primario + espejo');
-  assert.ok(fetchImpl.calls[0].url.startsWith('https://nostr.download/upload'));
-  assert.ok(fetchImpl.calls[1].url.startsWith('https://cdn.hzrd149.com/upload'));
+  assert.ok(fetchImpl.calls[0].url.startsWith('https://cdn.hzrd149.com/upload'));
+  assert.ok(fetchImpl.calls[1].url.startsWith('https://nostr.download/upload'));
   const c = fetchImpl.calls[0];
   assert.equal(c.opts.method, 'PUT');
   assert.equal(c.opts.headers['Content-Type'], 'image/jpeg');
@@ -204,27 +204,27 @@ test('uploadPhoto: éxito en el primario, auth BUD-02 correcta y espejo al segun
 test('uploadPhoto: si el primario falla, cae al segundo servidor', async () => {
   const sk = generateSecretKey();
   const fetchImpl = mockFetch([
-    { server: 'https://nostr.download', ok: false, status: 500 },
-    { server: 'https://cdn.hzrd149.com', json: { url: 'https://cdn.hzrd149.com/ok.jpg' } },
+    { server: 'https://cdn.hzrd149.com', ok: false, status: 500 },
+    { server: 'https://nostr.download', json: { url: 'https://nostr.download/ok.jpg' } },
   ]);
   const url = await uploadPhoto(fotoBlob(), sk, { fetchImpl, nowSec: NOW });
-  assert.equal(url, 'https://cdn.hzrd149.com/ok.jpg');
+  assert.equal(url, 'https://nostr.download/ok.jpg');
   await wait(10); // el espejo posterior al éxito también corre
   // primario (falla) → segundo (ok) → espejo best-effort al primero
   assert.equal(fetchImpl.calls.length, 3);
-  assert.ok(fetchImpl.calls[0].url.startsWith('https://nostr.download'));
-  assert.ok(fetchImpl.calls[1].url.startsWith('https://cdn.hzrd149.com'));
-  assert.ok(fetchImpl.calls[2].url.startsWith('https://nostr.download'), 'espejo al otro servidor');
+  assert.ok(fetchImpl.calls[0].url.startsWith('https://cdn.hzrd149.com'));
+  assert.ok(fetchImpl.calls[1].url.startsWith('https://nostr.download'));
+  assert.ok(fetchImpl.calls[2].url.startsWith('https://cdn.hzrd149.com'), 'espejo al otro servidor');
 });
 
 test('uploadPhoto: respuesta solo NIP-94 también da la URL', async () => {
   const sk = generateSecretKey();
   const fetchImpl = mockFetch([
-    { server: 'https://nostr.download', json: { nip94_event: { kind: 1063, tags: [['url', 'https://nostr.download/nip94.jpg']] } } },
-    { server: 'https://cdn.hzrd149.com', json: { url: 'https://cdn.hzrd149.com/nip94.jpg' } },
+    { server: 'https://cdn.hzrd149.com', json: { nip94_event: { kind: 1063, tags: [['url', 'https://cdn.hzrd149.com/nip94.jpg']] } } },
+    { server: 'https://nostr.download', json: { url: 'https://nostr.download/nip94.jpg' } },
   ]);
   const url = await uploadPhoto(fotoBlob(), sk, { fetchImpl, nowSec: NOW });
-  assert.equal(url, 'https://nostr.download/nip94.jpg');
+  assert.equal(url, 'https://cdn.hzrd149.com/nip94.jpg');
 });
 
 test('uploadPhoto: si todos fallan, lanza (la UI muestra el error)', async () => {
@@ -238,7 +238,7 @@ test('uploadPhoto: si todos fallan, lanza (la UI muestra el error)', async () =>
 });
 
 test('uploadPhoto: servidores por defecto en el orden pedido', () => {
-  assert.deepEqual(BLOSSOM_SERVERS, ['https://nostr.download', 'https://cdn.hzrd149.com']);
+  assert.deepEqual(BLOSSOM_SERVERS, ['https://cdn.hzrd149.com', 'https://nostr.download']);
 });
 
 test('uploadToBlossom: respuesta sin URL cuenta como fallo', async () => {
@@ -286,7 +286,7 @@ test('smoke: paso 7 muestra botón de galería e input file; la subida rellena l
   const calls = [];
   globalThis.fetch = async (url, opts) => {
     calls.push({ url, opts });
-    return { ok: true, status: 201, json: async () => ({ url: 'https://nostr.download/foto-smoke.jpg' }) };
+    return { ok: true, status: 201, json: async () => ({ url: 'https://cdn.hzrd149.com/foto-smoke.jpg' }) };
   };
   try {
     const file = new dom.window.File([new Uint8Array([137, 80, 78, 71])], 'foto.jpg', { type: 'image/jpeg' });
@@ -297,11 +297,11 @@ test('smoke: paso 7 muestra botón de galería e input file; la subida rellena l
     let ok = false;
     for (let i = 0; i < 60 && !ok; i++) {
       await wait(100);
-      ok = urlInput.value === 'https://nostr.download/foto-smoke.jpg';
+      ok = urlInput.value === 'https://cdn.hzrd149.com/foto-smoke.jpg';
     }
     assert.ok(ok, 'la URL resultante rellena el campo (valor: ' + urlInput.value + ')');
-    assert.equal(S.borrador.fotoURL, 'https://nostr.download/foto-smoke.jpg');
-    assert.equal(calls[0].url, 'https://nostr.download/upload', 'subió al primario primero');
+    assert.equal(S.borrador.fotoURL, 'https://cdn.hzrd149.com/foto-smoke.jpg');
+    assert.equal(calls[0].url, 'https://cdn.hzrd149.com/upload', 'subió al primario primero');
     assert.equal(calls[0].opts.method, 'PUT');
     const estado = document.querySelector('#foto-estado');
     assert.match(estado.textContent, /Foto subida/);

@@ -19,7 +19,9 @@ import { finalizeEvent } from 'nostr-tools';
 
 // Servidores Blossom, en orden de preferencia. El que responde primero
 // es el primario; el resto reciben copia espejo (best-effort).
-export const BLOSSOM_SERVERS = ['https://nostr.download', 'https://cdn.hzrd149.com'];
+// Orden verificado en real (2026-10-20): cdn.hzrd149.com acepta subidas
+// BUD-02 de claves nuevas (201); nostr.download devolvió 409.
+export const BLOSSOM_SERVERS = ['https://cdn.hzrd149.com', 'https://nostr.download'];
 
 export const KIND_BLOSSOM_AUTH = 24242;
 export const AUTH_EXPIRATION_SEGS = 600; // 10 min, como pide BUD-02

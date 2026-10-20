@@ -3,7 +3,7 @@
     "@noble/hashes": "^2.0.1",
     "nostr-tools": "^2.25.2"
   },
-  "description": "CubMatch — app de citas para Cuba sobre GitHub + Nostr. $0, sin servidor, funciona sin VPN.",
+  "description": "CubMatch \u2014 app de citas para Cuba sobre GitHub + Nostr. $0, sin servidor, funciona sin VPN.",
   "devDependencies": {
     "esbuild": "^0.28.2",
     "jsdom": "^30.1.3",
@@ -16,5 +16,5 @@
     "test": "node --test \"test/*.test.mjs\""
   },
   "type": "module",
-  "version": "1.5.0"
+  "version": "1.5.1"
 }
