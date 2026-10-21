@@ -8,7 +8,8 @@ import {
   buildLikeEvent, buildDislikeEvent, parseLikeEvent, mutualMatches,
   buildReporteEvent, parseReporteEvent,
   buildRelayListEvent, parseRelayListEvent,
-  buildDMInboxEvent, parseDMInboxEvent,
+  buildDMInboxEvent, parseDMInboxEvent, inboxDesactualizado, migrarInboxSiDesactualizado,
+  publishIdentityDocs,
   mergePerfiles, mergeLikes,
 } from '../src/cubmatch.js';
 import { RELAYS, ALL_RELAYS } from '../src/red.js';
@@ -118,6 +119,71 @@ test('10002 (NIP-65) y 10050 (NIP-17): build → parse round-trip', () => {
   // Solo ws(s):// pasa el filtro
   const t3 = buildRelayListEvent(['wss://a.io', 'ws://c.io', 'https://b.io', 'nota-relay']);
   assert.deepEqual(t3.tags, [['r', 'wss://a.io'], ['r', 'ws://c.io']]);
+});
+
+test('messaging por defecto: primal + nostr.mom (relay.nostr.band sustituido en v1.8.2)', () => {
+  assert.deepEqual(RELAYS.messaging, ['wss://relay.primal.net', 'wss://nostr.mom']);
+  assert.ok(!ALL_RELAYS.some((u) => u.includes('nostr.band')));
+});
+
+test('inboxDesactualizado: comparación por conjuntos contra el messaging actual', () => {
+  const cur = ['wss://relay.primal.net', 'wss://nostr.mom'];
+  assert.equal(inboxDesactualizado(cur, cur), false);
+  assert.equal(inboxDesactualizado([...cur].reverse(), cur), false, 'el orden no importa');
+  assert.equal(inboxDesactualizado(['wss://relay.primal.net', 'wss://relay.nostr.band'], cur), true, 'lista vieja con band');
+  assert.equal(inboxDesactualizado(null, cur), true, 'sin registro local (versión vieja) → migra');
+  assert.equal(inboxDesactualizado('basura', cur), true, 'basura → migra');
+  assert.equal(inboxDesactualizado([], cur), true, 'vacía → migra');
+});
+
+test('migración 10050: publicado con band → se republica con nostr.mom', async () => {
+  const publicados = [];
+  const pool = {
+    roles: { discovery: [...RELAYS.discovery], messaging: [...RELAYS.messaging] },
+    publishAll: async (ev) => { publicados.push(ev); return [true, true]; },
+  };
+  let guardado = ['wss://relay.primal.net', 'wss://relay.nostr.band'];
+  const store = { get: () => guardado, set: (r) => { guardado = r; } };
+
+  const migro = await migrarInboxSiDesactualizado(pool, store);
+  assert.equal(migro, true);
+  const inbox = publicados.find((e) => e.kind === KIND_DM_INBOX);
+  assert.ok(inbox, 'se republicó el 10050');
+  assert.deepEqual(
+    inbox.tags.map((t) => t[1]).sort(),
+    ['wss://nostr.mom', 'wss://relay.primal.net'],
+    'el 10050 nuevo anuncia primal + nostr.mom, sin band',
+  );
+  const lista = publicados.find((e) => e.kind === KIND_RELAY_LIST);
+  assert.ok(lista && !lista.tags.some((t) => String(t[1]).includes('nostr.band')), 'el 10002 tampoco anuncia band');
+  assert.deepEqual(guardado, [...RELAYS.messaging], 'queda registrada la lista nueva');
+
+  // Segunda vez: ya correcto → no se toca.
+  publicados.length = 0;
+  assert.equal(await migrarInboxSiDesactualizado(pool, store), false);
+  assert.equal(publicados.length, 0, 'sin publicaciones cuando ya está al día');
+});
+
+test('migración 10050: usuario sin registro local (versión vieja) migra una vez', async () => {
+  const publicados = [];
+  const pool = {
+    roles: { discovery: [...RELAYS.discovery], messaging: [...RELAYS.messaging] },
+    publishAll: async (ev) => { publicados.push(ev); return [true, true]; },
+  };
+  const store = { get: () => null, set: () => {} };
+  assert.equal(await migrarInboxSiDesactualizado(pool, store), true);
+  assert.ok(publicados.some((e) => e.kind === KIND_DM_INBOX));
+});
+
+test('publishIdentityDocs: el 10050 sale con el scope messaging del pool', async () => {
+  const publicados = [];
+  const pool = {
+    roles: { discovery: ['wss://d1.test'], messaging: ['wss://m1.test', 'wss://m2.test'] },
+    publishAll: async (ev) => { publicados.push(ev); return [true]; },
+  };
+  await publishIdentityDocs(pool);
+  const inbox = publicados.find((e) => e.kind === KIND_DM_INBOX);
+  assert.deepEqual(inbox.tags.map((t) => t[1]), ['wss://m1.test', 'wss://m2.test']);
 });
 
 test('mergePerfiles: dedup por id y newest-wins por autor', () => {

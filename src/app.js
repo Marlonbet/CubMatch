@@ -21,7 +21,7 @@ import {
   KIND_PERFIL,
   parsePerfilEvent, publishPerfil, fetchPerfiles,
   sendLike, sendDislike, fetchLikes, mutualMatches, sendReporte,
-  publishIdentityDocs, sendDMRouted, setInboxStore,
+  publishIdentityDocs, migrarInboxSiDesactualizado, sendDMRouted, setInboxStore,
   mergePerfiles, mergeLikes,
 } from './cubmatch.js';
 import {
@@ -482,7 +482,10 @@ async function submitCuenta() {
         // Documentos de identidad: NIP-65 (10002, mis relays) e inbox
         // NIP-17 (10050, dónde recibo DMs). Best-effort: los fallbacks
         // de lectura cubren si algún relay falla aquí.
-        try { await publishIdentityDocs(tmp); } catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
+        try {
+          await publishIdentityDocs(tmp);
+          try { LS.set(LS_MI_INBOX, RELAYS.messaging.slice()); } catch {}
+        } catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
       } else {
         const { pubkey } = importIdentity(nsecOf(sk));
         if (!verifyCredentials(pubkey, claim)) {
@@ -528,6 +531,7 @@ async function enterApp(username, sk) {
   }
   startCalls();
   startPresencia();
+  migrarInboxSiToca();
 }
 
 async function restoreSession(ses) {
@@ -553,6 +557,7 @@ async function restoreSession(ses) {
     }
     startCalls();
     startPresencia();
+    migrarInboxSiToca();
   } catch {
     LS.del('sesion');
     showInicio();
@@ -883,6 +888,7 @@ async function obSiguiente() {
 const LS_PERFILES = 'cache_perfiles';
 const LS_LIKES = 'cache_likes';
 const LS_SYNC_D = 'lastSync_descubrimiento';
+const LS_MI_INBOX = 'mi_inbox_relays'; // messaging con el que publiqué mi 10050
 
 function buildDiscoveryData(me, perfiles, likes) {
   S.perfilCache = new Map(perfiles.map((p) => [p.pubkey, p]));
@@ -968,8 +974,24 @@ function forceRefresh() {
 // son best-effort: si fallan, los fallbacks de lectura lo cubren.
 async function publishPerfilAndDocs(profile) {
   await publishPerfil(S.pool, profile);
-  try { await publishIdentityDocs(S.pool); }
+  try {
+    await publishIdentityDocs(S.pool);
+    try { LS.set(LS_MI_INBOX, S.pool.roles.messaging.slice()); } catch {}
+  }
   catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
+}
+
+// Migración de relays de DM (v1.8.2): si mi 10050 quedó publicado con un
+// scope messaging distinto del actual (p. ej. con relay.nostr.band, que
+// dejó de conectar), republicarlo con la lista nueva al entrar. La lista
+// con la que publiqué por última vez vive en localStorage; quien viene
+// de versiones viejas no la tiene y migra una sola vez. Best-effort y
+// sin bloquear la entrada: si falla, se reintenta en el próximo arranque.
+function migrarInboxSiToca() {
+  migrarInboxSiDesactualizado(S.pool, {
+    get: () => LS.get(LS_MI_INBOX, null),
+    set: (relays) => LS.set(LS_MI_INBOX, relays),
+  }).catch((e) => console.warn('[cubmatch] migración de inbox (10050) falló', e));
 }
 
 // ---------- 4. deck ----------

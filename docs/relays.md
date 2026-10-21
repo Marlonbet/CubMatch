@@ -9,7 +9,7 @@ móviles (caché-primero + `since`).
 | Rol | Relays | Qué viaja por ahí |
 |---|---|---|
 | `discovery` | `wss://relay.damus.io`, `wss://nos.lol` | perfiles (30079), likes (kind 7), reclamos de nombre (30078), listas 10002/10050 |
-| `messaging` | `wss://relay.primal.net`, `wss://relay.nostr.band` | DMs (kind 4, inbox NIP-17), receipts (24503), typing/presencia + respaldo de lo crítico |
+| `messaging` | `wss://relay.primal.net`, `wss://nostr.mom` | DMs (kind 4, inbox NIP-17), receipts (24503), typing/presencia + respaldo de lo crítico |
 
 Reglas de tráfico:
 

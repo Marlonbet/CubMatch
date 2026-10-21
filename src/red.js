@@ -23,7 +23,7 @@ export const KIND_RECEIPT = 24503; // confirmación de lectura (se guarda)
 // - messaging: DMs (inbox NIP-17) + respaldo de lo crítico
 export const RELAYS = {
   discovery: ['wss://relay.damus.io', 'wss://nos.lol'],
-  messaging: ['wss://relay.primal.net', 'wss://relay.nostr.band'],
+  messaging: ['wss://relay.primal.net', 'wss://nostr.mom'],
 };
 export const ALL_RELAYS = [...RELAYS.discovery, ...RELAYS.messaging];
 export const relayRole = (url) =>

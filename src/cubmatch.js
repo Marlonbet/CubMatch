@@ -270,6 +270,38 @@ export function publishIdentityDocs(pool) {
   ]);
 }
 
+// ---- Migración de relays de DM ----
+// Cuando un relay de messaging se sustituye (p. ej. uno que dejó de
+// conectar), los usuarios antiguos quedan con su 10050 publicado con la
+// lista vieja: desde fuera se les sigue enrutando DMs a un relay muerto.
+// Comparación por conjuntos de la lista con la que publiqué mi 10050
+// (guardada en local por la app) contra el scope messaging actual.
+// Sin registro local (versiones previas a la migración) o con basura,
+// cuenta como desactualizado: se republica una vez y queda registrado.
+export function inboxDesactualizado(publicados, actuales) {
+  const cur = cleanRelayList(actuales);
+  if (!Array.isArray(publicados)) return true;
+  const old = cleanRelayList(publicados);
+  if (old.length !== cur.length) return true;
+  const set = new Set(old);
+  return cur.some((u) => !set.has(u));
+}
+
+// Si mi 10050 quedó publicado con relays distintos a los actuales,
+// republica los documentos de identidad con la lista nueva y registra
+// la lista publicada en `store` ({get,set} inyectado por la app).
+// Devuelve true si republicó. Lanza si la publicación falla (la app
+// lo trata como best-effort y reintenta en el próximo arranque).
+export async function migrarInboxSiDesactualizado(pool, store) {
+  const actuales = pool.roles.messaging.slice();
+  let publicados = null;
+  try { publicados = store.get(); } catch { publicados = null; }
+  if (!inboxDesactualizado(publicados, actuales)) return false;
+  await publishIdentityDocs(pool);
+  try { store.set(actuales); } catch { /* registro local opcional */ }
+  return true;
+}
+
 // ---- Inbox ajeno (para enrutar DMs) ----
 // Caché con TTL 24h. La app conecta este store a localStorage en el boot;
 // en tests usa el mapa en memoria.

@@ -45,7 +45,7 @@ Score(u,v) = w1·cos(pu,pv) + w2·cos(pu,prefv) + w3·cos(pv,prefu)
 ┌─────────────┐   eventos firmados   ┌──────────────────────┐
 │ cubmatch.html│ ◄──────────────────► │ Relays Nostr (5)     │
 │ (tu teléfono)│   kind 30079 perfil  │ damus, nos.lol,      │
-│ 100% cliente │   kind 7 likes       │ nostr.band, primal,  │
+│ 100% cliente │   kind 7 likes       │ nostr.mom, primal,   │
 └─────────────┘   kind 4 DMs (NIP-04)│ wellorder            │
        ▲          kind 1984 reportes  └──────────────────────┘
        │ actualiza vía                        ▲
