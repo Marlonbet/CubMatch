@@ -307,6 +307,40 @@ export function textoRegistroLlamada({ media, resultado, durSeg } = {}) {
   }
 }
 
+// Texto en español para un fallo de getUserMedia según el error
+// real del navegador: el usuario merece distinguir un permiso
+// denegado de un micrófono inexistente o de uno ocupado por otra
+// app — no un genérico que no dice nada.
+export function mensajeErrorMedios(err, media) {
+  const video = media === 'video';
+  const name = err && typeof err.name === 'string' ? err.name : '';
+  const msg = err && typeof err.message === 'string' ? err.message : '';
+  // Sin getUserMedia no hay llamada posible en este navegador o
+  // contexto (WebView, página no segura): app.js rechaza con
+  // name 'SinGetUserMedia' (o, en su defecto, este mensaje exacto).
+  if (name === 'SinGetUserMedia' || msg === 'getUserMedia no disponible') {
+    return 'Tu navegador no permite llamadas aquí. Abre la página en Safari o Chrome.';
+  }
+  switch (name) {
+    case 'NotReadableError':
+    case 'AbortError':
+      return video
+        ? 'La cámara o el micrófono están ocupados por otra aplicación.'
+        : 'El micrófono está ocupado por otra aplicación.';
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return video
+        ? 'No se encontró micrófono o cámara en este dispositivo.'
+        : 'No se encontró micrófono en este dispositivo.';
+    case 'NotAllowedError':
+    case 'SecurityError':
+    default:
+      return video
+        ? 'Permiso de cámara o micrófono denegado. Revisa los permisos del navegador.'
+        : 'Permiso de micrófono denegado. Revisa los permisos del navegador.';
+  }
+}
+
 // ------------------------------------------------------------ máquina de estados
 
 // Estados: idle → saliendo → conectando → conectada
@@ -737,8 +771,15 @@ export class CallSession {
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'ice', media: cur.media, candidate: cand }));
     };
     pc.ontrack = (e) => {
-      const stream = (e.streams && e.streams[0]) || null;
-      if (stream) {
+      let stream = (e.streams && e.streams[0]) || null;
+      // Blindaje: si una pista llega sin stream asociado (pasa en
+      // algunos WebView), sin esto remoteStream quedaba null y la
+      // llamada "conectaba" muda. Se arma un stream con la pista.
+      if (!stream && e.track && typeof MediaStream === 'function') {
+        stream = this.remoteStream || new MediaStream();
+        try { stream.addTrack(e.track); } catch {}
+      }
+      if (stream && stream !== this.remoteStream) {
         this.remoteStream = stream;
         this._emit({ tipo: 'stream-remoto', stream });
       }
@@ -810,14 +851,12 @@ export class CallSession {
     let stream;
     try {
       stream = await this._getLocalStream(media);
-    } catch {
+    } catch (err) {
       if (this.current !== cur) return false; // abortada mientras pedía el medio
       this._reset();
       this._emit({
         tipo: 'terminada', peer, media, id: cur.id, durSeg: 0, resultado: 'error',
-        mensaje: media === 'video'
-          ? 'Permiso de cámara o micrófono denegado. Revisa los permisos del navegador.'
-          : 'Permiso de micrófono denegado. Revisa los permisos del navegador.',
+        mensaje: mensajeErrorMedios(err, media),
       });
       return false;
     }
@@ -975,13 +1014,10 @@ export class CallSession {
     let stream;
     try {
       stream = await this._getLocalStream(cur.media);
-    } catch {
+    } catch (err) {
       if (this.current !== cur) return false; // abortada mientras pedía el medio
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('error',
-        cur.media === 'video'
-          ? 'Permiso de cámara o micrófono denegado. Revisa los permisos del navegador.'
-          : 'Permiso de micrófono denegado. Revisa los permisos del navegador.');
+      this._terminar('error', mensajeErrorMedios(err, cur.media));
       return false;
     }
     if (this.current !== cur) {

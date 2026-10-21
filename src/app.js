@@ -2181,7 +2181,11 @@ const callDeps = {
   },
   getLocalStream: (media) => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return Promise.reject(new Error('getUserMedia no disponible'));
+      // Nombre propio: llamadas.js lo mapea a "abre la página en
+      // Safari o Chrome" en vez del texto de permiso denegado.
+      const e = new Error('getUserMedia no disponible');
+      e.name = 'SinGetUserMedia';
+      return Promise.reject(e);
     }
     return navigator.mediaDevices.getUserMedia({
       audio: true,
@@ -2308,15 +2312,41 @@ function closeCallOverlay() {
   if (ov) ov.remove();
 }
 
+// Reproducir un elemento de medios sin que un rechazo rompa
+// nada: en Safari iOS `autoplay` no basta para que suene el audio
+// remoto, y play() puede rechazar si el navegador aún lo retiene.
+function callPlay(el) {
+  if (!el || typeof el.play !== 'function') return;
+  try {
+    const p = el.play();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch {}
+}
+
+// Reintento de reproducción del remoto si quedó en pausa (gesto
+// del usuario en el overlay = desbloqueo clásico de iOS).
+function callPlayRemoto() {
+  const rv = document.getElementById('call-remote');
+  if (rv && rv.srcObject && rv.paused) callPlay(rv);
+}
+
 function callAttachStreams() {
   if (!callSession) return;
   const lv = document.getElementById('call-local');
-  if (lv && callSession.localStream && lv.srcObject !== callSession.localStream) {
-    try { lv.srcObject = callSession.localStream; } catch {}
+  if (lv && callSession.localStream) {
+    if (lv.srcObject !== callSession.localStream) {
+      try { lv.srcObject = callSession.localStream; } catch {}
+    }
+    callPlay(lv);
   }
   const rv = document.getElementById('call-remote');
-  if (rv && callSession.remoteStream && rv.srcObject !== callSession.remoteStream) {
-    try { rv.srcObject = callSession.remoteStream; } catch {}
+  if (rv && callSession.remoteStream) {
+    if (rv.srcObject !== callSession.remoteStream) {
+      try { rv.srcObject = callSession.remoteStream; } catch {}
+    }
+    // Explícito SIEMPRE (no solo al asignar): es también el
+    // reintento al pasar a 'conectada' vía onCallEvent.
+    callPlay(rv);
   }
 }
 
@@ -2343,7 +2373,10 @@ function showCallOverlay(modo, peer, media) {
     (esVideo
       ? '<div class="call-videos"><video id="call-remote" autoplay playsinline></video>' +
         '<video id="call-local" autoplay playsinline muted></video></div>'
-      : '') +
+      // En voz el remoto es un <audio>: sin elemento NO suena
+      // (un stream WebRTC sin elemento conectado es mudo). Va en
+      // el DOM aunque no se vea — clase sr, nunca display:none.
+      : '<audio id="call-remote" class="call-audio-remoto" autoplay></audio>') +
     (prof ? avatarImg(peer, prof, 'avatar big') : '') +
     '<h3>' + esc(nombre) + '</h3>' +
     '<p class="call-tipo muted">' + (esVideo ? '🎥 Videollamada' : '📞 Llamada de voz') + '</p>' +
@@ -2352,6 +2385,7 @@ function showCallOverlay(modo, peer, media) {
     '<div class="call-actions">' + acciones + '</div>' +
     '</div>';
   ov.addEventListener('click', (e) => {
+    callPlayRemoto(); // cualquier toque: gesto que desbloquea el audio en iOS
     const btn = e.target.closest('[data-call]');
     if (!btn || !callSession) return;
     const act = btn.dataset.call;
@@ -2427,6 +2461,7 @@ function onCallEvent(e) {
   } else if (e.tipo === 'relevo') {
     gestionarRelevo(e);
   } else if (e.tipo === 'conectada') {
+    callAttachStreams(); // reintento de play() ahora que hay llamada
     const est = document.getElementById('call-estado');
     if (est) est.textContent = 'En llamada · ' + fmtDuracion(callSession ? callSession.duracionSeg() : 0);
     if (callUiTimer) clearInterval(callUiTimer);

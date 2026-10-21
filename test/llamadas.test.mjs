@@ -14,7 +14,7 @@ import {
   KIND_CALL, buildCallPayload, parseCallPayload, newCallId,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
   iceServersConfig, fusionarIceServers, obtenerIceServers, offerEsFresca, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
-  RING_IN_TIMEOUT_MS, CONNECT_TIMEOUT_MS, ICE_DISCONNECTED_GRACE_MS,
+  RING_IN_TIMEOUT_MS, CONNECT_TIMEOUT_MS, ICE_DISCONNECTED_GRACE_MS, mensajeErrorMedios,
 } from '../src/llamadas.js';
 
 // ------------------------------------------------------------ payloads
@@ -973,5 +973,153 @@ test('smoke: mi PROPIA offer (autor = yo) jamás me suena como entrante', async 
   const ev = await offerEvent('call-9999000011112222', Math.floor(Date.now() / 1000), skB, pkA);
   await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
   assert.equal(document.getElementById('call-overlay'), null, 'mi propia señalización no me suena');
+  T.stopCalls();
+});
+
+// ------------------------------------------------- fix v1.10.1: audio mudo
+
+test('mensajeErrorMedios: cada error de getUserMedia da su texto claro', () => {
+  const conNombre = (name) => { const e = new Error('fallo'); e.name = name; return e; };
+  // Permiso denegado: el texto de siempre, por medio.
+  assert.equal(mensajeErrorMedios(conNombre('NotAllowedError'), 'audio'),
+    'Permiso de micrófono denegado. Revisa los permisos del navegador.');
+  assert.equal(mensajeErrorMedios(conNombre('NotAllowedError'), 'video'),
+    'Permiso de cámara o micrófono denegado. Revisa los permisos del navegador.');
+  // Sin dispositivo.
+  assert.equal(mensajeErrorMedios(conNombre('NotFoundError'), 'audio'),
+    'No se encontró micrófono en este dispositivo.');
+  assert.equal(mensajeErrorMedios(conNombre('OverconstrainedError'), 'audio'),
+    'No se encontró micrófono en este dispositivo.');
+  assert.equal(mensajeErrorMedios(conNombre('NotFoundError'), 'video'),
+    'No se encontró micrófono o cámara en este dispositivo.');
+  // Ocupado por otra app.
+  assert.equal(mensajeErrorMedios(conNombre('NotReadableError'), 'audio'),
+    'El micrófono está ocupado por otra aplicación.');
+  assert.equal(mensajeErrorMedios(conNombre('NotReadableError'), 'video'),
+    'La cámara o el micrófono están ocupados por otra aplicación.');
+  // Sin getUserMedia (WebView / contexto no seguro).
+  assert.equal(mensajeErrorMedios(conNombre('SinGetUserMedia'), 'audio'),
+    'Tu navegador no permite llamadas aquí. Abre la página en Safari o Chrome.');
+  assert.equal(mensajeErrorMedios(new Error('getUserMedia no disponible'), 'video'),
+    'Tu navegador no permite llamadas aquí. Abre la página en Safari o Chrome.');
+  // Desconocido o basura: cae al texto de permiso, nunca lanza.
+  assert.equal(mensajeErrorMedios(new Error('otra cosa'), 'audio'),
+    'Permiso de micrófono denegado. Revisa los permisos del navegador.');
+  assert.equal(mensajeErrorMedios(null, 'audio'),
+    'Permiso de micrófono denegado. Revisa los permisos del navegador.');
+  assert.equal(mensajeErrorMedios(undefined, 'video'),
+    'Permiso de cámara o micrófono denegado. Revisa los permisos del navegador.');
+});
+
+test('sesión: al llamar, un NotReadableError se explica como micrófono ocupado', async () => {
+  const e = new Error('ocupado'); e.name = 'NotReadableError';
+  const { ses, sent, eventos } = mkSession({ getLocalStream: async () => { throw e; } });
+  assert.equal(await ses.llamar('peerPK', 'audio'), false);
+  assert.equal(ses.state, 'idle');
+  assert.equal(sent.length, 0, 'sin señalización');
+  const fin = eventos.find((ev) => ev.tipo === 'terminada');
+  assert.equal(fin.resultado, 'error');
+  assert.equal(fin.mensaje, 'El micrófono está ocupado por otra aplicación.');
+});
+
+test('sesión: al aceptar, un NotFoundError se explica como micrófono no encontrado', async () => {
+  const e = new Error('no hay'); e.name = 'NotFoundError';
+  const { ses, sent, eventos } = mkSession({ getLocalStream: async () => { throw e; } });
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({
+    t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP-DE-A',
+  })));
+  assert.equal(ses.state, 'entrante');
+  assert.equal(await ses.aceptar(), false);
+  assert.equal(ses.state, 'idle');
+  const fin = eventos.find((ev) => ev.tipo === 'terminada');
+  assert.equal(fin.resultado, 'error');
+  assert.equal(fin.mensaje, 'No se encontró micrófono en este dispositivo.');
+  assert.ok(sent.some((s) => s.payload.op === 'end'), 'al que llamaba se le avisa con end');
+});
+
+test('smoke: el overlay de VOZ trae <audio id="call-remote"> (sin él la llamada es muda)', async () => {
+  prepararChat(0, { apodo: 'Ana', videoOk: true });
+  T.setCallDeps({
+    send: async () => {},
+    createPC: () => new FakePC(),
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  const ev = await offerEvent('call-1357135713571357', Math.floor(Date.now() / 1000));
+  await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
+  const ov = document.getElementById('call-overlay');
+  assert.ok(ov, 'overlay de llamada de voz abierto');
+  const au = ov.querySelector('audio#call-remote');
+  assert.ok(au, 'existe el elemento de audio remoto');
+  assert.ok(au.classList.contains('call-audio-remoto'), 'con su clase (presente, no display:none)');
+  assert.equal(ov.querySelector('video#call-remote'), null, 'en voz no hay video remoto');
+  ov.querySelector('[data-call="rechazar"]').click();
+  await wait(30);
+  T.stopCalls();
+});
+
+test('smoke: el overlay de VIDEO trae <video id="call-remote"> y no el audio de voz', async () => {
+  prepararChat(12, { apodo: 'Ana', videoOk: true });
+  T.setCallDeps({
+    send: async () => {},
+    createPC: () => new FakePC(),
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  const payload = { t: 'call', v: 1, id: 'call-2468246824682468', op: 'offer', media: 'video', sdp: 'SDP-DE-A' };
+  const ev = finalizeEvent({
+    kind: KIND_CALL, created_at: Math.floor(Date.now() / 1000),
+    tags: [['p', pkB]], content: await nip04.encrypt(skA, pkB, JSON.stringify(payload)),
+  }, skA);
+  await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
+  const ov = document.getElementById('call-overlay');
+  assert.ok(ov, 'overlay de videollamada abierto');
+  assert.ok(ov.querySelector('video#call-remote'), 'video remoto presente');
+  assert.equal(ov.querySelector('audio#call-remote'), null, 'en video no se añade el audio de voz');
+  ov.querySelector('[data-call="rechazar"]').click();
+  await wait(30);
+  T.stopCalls();
+});
+
+test('smoke: al llegar el stream remoto en voz se asigna srcObject y se llama a play(); conectada y un toque reintentan', async () => {
+  prepararChat(0, { apodo: 'Ana', videoOk: true });
+  const plays = [];
+  dom.window.HTMLMediaElement.prototype.play = function () { plays.push(this); return Promise.resolve(); };
+  let fakePC = null;
+  T.setCallDeps({
+    send: async () => {},
+    createPC: () => { fakePC = new FakePC(); return fakePC; },
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  const ev = await offerEvent('call-1122334455667788', Math.floor(Date.now() / 1000));
+  await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
+  const ov = document.getElementById('call-overlay');
+  assert.ok(ov, 'overlay entrante abierto');
+  const au = ov.querySelector('audio#call-remote');
+  assert.ok(au, 'audio remoto presente');
+
+  ov.querySelector('[data-call="aceptar"]').click();
+  await wait(60);
+  const ses = T.getCallSession();
+  assert.equal(ses.state, 'conectando');
+  assert.ok(fakePC, 'el pc falso se creó al aceptar');
+
+  const antes = plays.filter((el) => el === au).length;
+  fakePC.emitTrack(); // llega el stream remoto
+  assert.equal(au.srcObject, ses.remoteStream, 'el stream remoto quedó asignado al <audio>');
+  const trasStream = plays.filter((el) => el === au).length;
+  assert.ok(trasStream > antes, 'play() se llamó al asignar el stream');
+
+  fakePC.setConnState('connected'); // pasa a conectada → reintento de play
+  const trasConectar = plays.filter((el) => el === au).length;
+  assert.ok(trasConectar > trasStream, 'play() se reintentó al pasar a conectada');
+
+  ov.querySelector('h3').click(); // toque cualquiera en el overlay (no un botón)
+  const trasToque = plays.filter((el) => el === au).length;
+  assert.ok(trasToque > trasConectar, 'play() se reintentó con el toque (desbloqueo iOS)');
+
+  ov.querySelector('[data-call="colgar"]').click();
+  await wait(30);
   T.stopCalls();
 });
