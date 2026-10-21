@@ -1,11 +1,22 @@
 // CUBMATCH — llamadas de voz y video entre matches (v1.7.0).
 //
-// WebRTC puro entre pares, SIN servidor de medios: la señalización
-// viaja como eventos efímeros kind 21004 (rango 20000-29999: los
-// relays no los almacenan) con el contenido cifrado NIP-04 al par,
-// igual que los DMs. Solo hay STUN público: sin TURN, si las redes de
-// ambos no permiten conexión directa, ICE falla y la llamada no
-// conecta (la UI lo dice con honestidad).
+// WebRTC puro entre pares, SIN servidor de medios propio: la
+// señalización viaja como eventos efímeros kind 21004 (rango
+// 20000-29999) con el contenido cifrado NIP-04 al par, igual que
+// los DMs. OJO: no todos los relays tratan ese rango como efímero
+// de verdad — algunos lo almacenan y lo reentregan al reconectar o
+// re-suscribir. Por eso la app defiende la entrada: puerta de
+// frescura sobre created_at (app.js) + dedup por callId aquí: una
+// offer vieja o repetida NUNCA suena dos veces.
+//
+// Rutas ICE: STUN público para la conexión directa y, de respaldo,
+// TURN público comunitario (OpenRelay de Metered): con CGNAT en
+// ambos lados (datos móviles) el solo-STUN no atraviesa y el relevo
+// es la única vía. Cuando se usa TURN, el medio pasa por ese
+// servidor, pero cifrado extremo a extremo (DTLS-SRTP): el relevo
+// no puede escucharlo. Es un servicio gratuito de terceros: si
+// también falla, la llamada no conecta y la UI lo dice con
+// honestidad.
 //
 // Reglas de producto (del dueño):
 // - Voz: disponible desde el primer momento tras el match.
@@ -28,6 +39,20 @@ export const MIN_MSGS_VIDEO = 10;
 export const RING_TIMEOUT_MS = 45000;       // timbre saliente: 45 s
 export const RING_IN_TIMEOUT_MS = 60000;    // timbre entrante: 60 s
 
+// Puerta de frescura de las offers: la señalización caduca enseguida
+// (el timbre saliente dura 45 s). Una offer con created_at más viejo
+// que esto es un eco almacenado por un relay, no una llamada real.
+export const OFFER_MAX_EDAD_SEG = 60;
+// Tolerancia a relojes adelantados: más que esto ya es absurdo.
+export const OFFER_MAX_FUTURO_SEG = 120;
+// Buffer de ICE que llega antes que su offer (los relays no
+// garantizan orden entre eventos): vive poco y se aplica al sonar.
+export const ICE_BUFFER_TTL_MS = 60000;
+export const ICE_BUFFER_MAX_IDS = 8;
+export const ICE_BUFFER_MAX_POR_ID = 64;
+// Memoria de callId ya cerrados: una offer repetida no resucita.
+export const IDS_CERRADOS_TTL_MS = 10 * 60 * 1000;
+
 // STUN públicos (solo descubrimiento de rutas; el audio/video va
 // directo entre teléfonos, nunca pasa por estos servidores).
 export const STUN_URLS = [
@@ -36,8 +61,21 @@ export const STUN_URLS = [
   'stun:stun.l.google.com:19302',
 ];
 
+// TURN público comunitario (proyecto OpenRelay de Metered, con
+// credenciales públicas): el respaldo para datos móviles tras CGNAT.
+export const TURN_URLS = [
+  'turn:openrelay.metered.ca:80',
+  'turn:openrelay.metered.ca:80?transport=tcp',
+  'turns:openrelay.metered.ca:443',
+];
+export const TURN_USER = 'openrelayproject';
+export const TURN_PASS = 'openrelayproject';
+
 export function iceServersConfig() {
-  return [{ urls: STUN_URLS.slice() }];
+  return [
+    { urls: STUN_URLS.slice() },
+    { urls: TURN_URLS.slice(), username: TURN_USER, credential: TURN_PASS },
+  ];
 }
 
 // ------------------------------------------------------------ ids
@@ -102,6 +140,20 @@ export function parseCallPayload(text) {
   }
   if (CALL_MOTIVOS.includes(o.motivo)) p.motivo = o.motivo;
   return p;
+}
+
+// ------------------------------------------------------------ frescura
+
+// ¿La offer es de AHORA? createdAtSeg y nowSeg en segundos (el
+// created_at del evento Nostr y el reloj local). Fresca si no tiene
+// más de OFFER_MAX_EDAD_SEG en el pasado ni más de
+// OFFER_MAX_FUTURO_SEG en el futuro (relojes desajustados). Todo lo
+// demás — vieja reproducida por un relay, fecha absurda, basura —
+// no es fresca y la offer se ignora en silencio.
+export function offerEsFresca(createdAtSeg, nowSeg) {
+  const c = Number(createdAtSeg), n = Number(nowSeg);
+  if (!Number.isFinite(c) || !Number.isFinite(n) || c <= 0) return false;
+  return n - c <= OFFER_MAX_EDAD_SEG && c - n <= OFFER_MAX_FUTURO_SEG;
 }
 
 // ------------------------------------------------------------ candados de video
@@ -199,6 +251,12 @@ export class CallSession {
     this._connectedAt = 0;
     this._ringTimer = null;
     this._iceQueue = [];
+    // Defensa ante reentregas de los relays (el mismo evento llega
+    // por varios, o un relay lo guardó y lo suelta al reconectar):
+    // ids de llamadas ya cerradas (no resucitan) y buffer de ICE
+    // que llegó antes que su offer (sin orden garantizado).
+    this._idsCerrados = new Map(); // id -> instante (ms, reloj inyectado)
+    this._iceHuerfano = new Map(); // id -> {peer, candidates: [], t0}
   }
 
   duracionSeg() {
@@ -225,9 +283,55 @@ export class CallSession {
 
   // Cierre local SIN avisar ni emitir (logout, cambio de cuenta).
   abortar() {
+    if (this.current) this._recordarId(this.current.id);
     this._teardown();
     this.state = 'idle';
     this.current = null;
+  }
+
+  // Anota un callId como cerrado: si su offer se reentrega, no suena.
+  _recordarId(id) {
+    if (!id) return;
+    this._idsCerrados.set(id, this._now());
+    this._iceHuerfano.delete(id);
+    this._podarMemoria();
+  }
+
+  // Poda por TTL la memoria anti-reentrega (ids cerrados y buffer
+  // de ICE huérfano). Se llama al anotar y al recibir señalización.
+  _podarMemoria() {
+    const ahora = this._now();
+    for (const [id, ts] of this._idsCerrados) {
+      if (ahora - ts > IDS_CERRADOS_TTL_MS) this._idsCerrados.delete(id);
+    }
+    for (const [id, b] of this._iceHuerfano) {
+      if (ahora - b.t0 > ICE_BUFFER_TTL_MS) this._iceHuerfano.delete(id);
+    }
+  }
+
+  _idCerrado(id) {
+    const ts = this._idsCerrados.get(id);
+    if (ts === undefined) return false;
+    if (this._now() - ts > IDS_CERRADOS_TTL_MS) { this._idsCerrados.delete(id); return false; }
+    return true;
+  }
+
+  // Guarda un candidato ICE que llegó antes que su offer (o sin
+  // sesión): se aplicará cuando la offer cree la sesión.
+  _buferizarIce(peer, payload) {
+    if (this._idCerrado(payload.id)) return; // llamada ya muerta
+    this._podarMemoria();
+    let b = this._iceHuerfano.get(payload.id);
+    if (!b) {
+      if (this._iceHuerfano.size >= ICE_BUFFER_MAX_IDS) {
+        // Fuera el más viejo (el Map conserva orden de inserción).
+        this._iceHuerfano.delete(this._iceHuerfano.keys().next().value);
+      }
+      b = { peer, candidates: [], t0: this._now() };
+      this._iceHuerfano.set(payload.id, b);
+    }
+    if (b.peer !== peer) return;
+    if (b.candidates.length < ICE_BUFFER_MAX_POR_ID) b.candidates.push(payload.candidate);
   }
 
   _teardown() {
@@ -251,6 +355,7 @@ export class CallSession {
   _terminar(resultado, mensaje) {
     const cur = this.current;
     const durSeg = this.duracionSeg();
+    if (cur) this._recordarId(cur.id);
     this._teardown();
     this.state = 'idle';
     this.current = null;
@@ -286,7 +391,8 @@ export class CallSession {
           this._emit({ tipo: 'conectada', peer: cur.peer, media: cur.media, id: cur.id });
         }
       } else if (st === 'failed') {
-        // Sin TURN no hay plan B: las redes no dejaron pasar el medio.
+        // Ni directo ni con el TURN de respaldo: las redes no
+        // dejaron pasar el medio.
         this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
         this._terminar('sin-conexion');
       }
@@ -302,8 +408,11 @@ export class CallSession {
   }
 
   async _addIce(candidate) {
-    if (!this.pc) return;
-    if (!this.pc.remoteDescription) { this._iceQueue.push(candidate); return; }
+    // Sin pc todavía (suena el timbre y el pc nace al aceptar): el
+    // candidato se ENCOLA, no se pierde — se aplica tras
+    // setRemoteDescription vía _flushIce. Perderlo aquí era perder
+    // justo los primeros candidatos del llamante.
+    if (!this.pc || !this.pc.remoteDescription) { this._iceQueue.push(candidate); return; }
     try { await this.pc.addIceCandidate(candidate); } catch {}
   }
 
@@ -371,6 +480,12 @@ export class CallSession {
     const { op } = payload;
 
     if (op === 'offer') {
+      // Reentregas de los relays: la MISMA offer puede llegar por
+      // varios relays, o resucitar de un almacén al reconectar. Una
+      // copia de la llamada en curso NO es "segunda llamada" (nada
+      // de reject ocupado) y una ya cerrada no vuelve a sonar.
+      if (this.current && payload.id === this.current.id) return;
+      if (this._idCerrado(payload.id)) return;
       if (this.state !== 'idle') {
         // Segunda llamada estando en una: ocupado, sin sonar.
         this._sendSafe(peer, buildCallPayload({ id: payload.id, op: 'reject', media: payload.media, motivo: 'ocupado' }));
@@ -379,6 +494,13 @@ export class CallSession {
       const cur = { id: payload.id, peer, media: payload.media, dir: 'entrante', sdp: payload.sdp };
       this.current = cur;
       this.state = 'entrante';
+      // ICE que llegó ANTES que esta offer: a la cola de la sesión,
+      // se aplica tras setRemoteDescription al aceptar.
+      const huerfano = this._iceHuerfano.get(payload.id);
+      if (huerfano) {
+        this._iceHuerfano.delete(payload.id);
+        if (huerfano.peer === peer) this._iceQueue.push(...huerfano.candidates);
+      }
       this._emit({ tipo: 'entrante', peer, media: cur.media, id: cur.id });
       this._armRingTimer(RING_IN_TIMEOUT_MS, () => {
         if (this.current === cur && this.state === 'entrante') this._terminar('perdida');
@@ -387,7 +509,14 @@ export class CallSession {
     }
 
     const cur = this.current;
-    if (!cur || payload.id !== cur.id || peer !== cur.peer) return;
+    if (!cur || payload.id !== cur.id || peer !== cur.peer) {
+      // ICE sin sesión todavía (llegó antes que la offer o durante
+      // un hueco entre relays): se buferiza por callId con TTL y se
+      // aplica cuando la offer cree la sesión. El resto de ops sin
+      // sesión no significan nada y se descartan.
+      if (op === 'ice' && this.state === 'idle') this._buferizarIce(peer, payload);
+      return;
+    }
 
     if (op === 'answer') {
       if (this.state !== 'saliendo' && this.state !== 'conectando') return;

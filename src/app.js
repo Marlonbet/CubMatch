@@ -7,7 +7,7 @@ import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoVa
 import {
   KIND_CALL, CallSession, buildCallPayload, parseCallPayload,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
-  iceServersConfig,
+  iceServersConfig, offerEsFresca,
 } from './llamadas.js';
 import {
   passwordStrength, checkUsername, fetchNetCount, netcountFromCache, logoSVG,
@@ -2169,6 +2169,9 @@ async function handleCallSignalEvent(ev) {
     sigCallOK.add(ev.id);
   }
   const peer = ev.pubkey;
+  // Mi propia señalización jamás es una llamada entrante para mí:
+  // mis eventos solo me interesan como respuestas/ICE dirigidos a
+  // mí, y vienen firmados por el OTRO. Lo mío se descarta aquí.
   if (!peer || peer === S.pubkey) return;
   if (S.bloqueados.includes(peer)) return;
   if (!esMatch(peer)) return; // solo llamadas de matches
@@ -2176,6 +2179,12 @@ async function handleCallSignalEvent(ev) {
   try { payload = parseCallPayload(await nip04.decrypt(S.sk, peer, ev.content)); }
   catch { return; }
   if (!payload) return;
+  // Puerta de frescura: hay relays que ALMACENAN el kind 21004 (no
+  // todos lo tratan como efímero) y lo reentregan al reconectar o
+  // re-suscribir — una offer vieja NO es una llamada de ahora y se
+  // ignora en silencio, sin sonar y sin rechazar nada. (La
+  // suscripción ya pide since=ahora; esto caza lo que se cuele.)
+  if (payload.op === 'offer' && !offerEsFresca(ev.created_at, Math.floor(Date.now() / 1000))) return;
   // Candado del lado receptor: una videollamada sin triple
   // consentimiento ni suena — rechazo silencioso con motivo.
   if (payload.op === 'offer' && payload.media === 'video') {
@@ -2329,7 +2338,7 @@ function onCallEvent(e) {
         break;
       case 'sin-conexion':
         registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'sin-conexion' }));
-        toast('No se pudo conectar: las redes de ambos no permitieron la conexión directa.');
+        toast('No se pudo conectar: no lo lograron ni la conexión directa ni el servidor de relevo. Revisa tu internet e inténtalo de nuevo.');
         break;
       case 'error':
         toast(e.mensaje || 'No se pudo completar la llamada.');

@@ -13,7 +13,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, nip04 } from 'nostr-too
 import {
   KIND_CALL, buildCallPayload, parseCallPayload, newCallId,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
-  iceServersConfig, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
+  iceServersConfig, offerEsFresca, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
 } from '../src/llamadas.js';
 
 // ------------------------------------------------------------ payloads
@@ -60,14 +60,23 @@ test('newCallId: formato y unicidad práctica', () => {
   assert.equal(newCallId(() => 0), 'call-0000000000000000');
 });
 
-test('iceServersConfig: los tres STUN pedidos', () => {
+test('iceServersConfig: STUN para directo + TURN OpenRelay de respaldo (datos móviles)', () => {
   const cfg = iceServersConfig();
-  assert.equal(cfg.length, 1);
+  assert.equal(cfg.length, 2);
   assert.deepEqual(cfg[0].urls, [
     'stun:stun.cloudflare.com:3478',
     'stun:stunserver.stunprotocol.org:3478',
     'stun:stun.l.google.com:19302',
   ]);
+  // TURN público de OpenRelay (Metered): UDP y TCP en el 80 y
+  // TLS en el 443, con sus credenciales públicas.
+  assert.deepEqual(cfg[1].urls, [
+    'turn:openrelay.metered.ca:80',
+    'turn:openrelay.metered.ca:80?transport=tcp',
+    'turns:openrelay.metered.ca:443',
+  ]);
+  assert.equal(cfg[1].username, 'openrelayproject');
+  assert.equal(cfg[1].credential, 'openrelayproject');
   assert.equal(KIND_CALL, 21004);
 });
 
@@ -293,7 +302,7 @@ test('sesión: segunda llamada estando en una → reject ocupado, la actual sigu
   assert.equal(ses.state, 'saliendo', 'la llamada actual no se tocó');
 });
 
-test('sesión: ICE failed → end + sin-conexion (sin TURN no hay plan B)', async () => {
+test('sesión: ICE failed → end + sin-conexion (ni directo ni con TURN)', async () => {
   const { ses, sent, eventos } = mkSession();
   await ses.llamar('peerPK', 'video');
   ses.pc.setConnState('failed');
@@ -320,6 +329,95 @@ test('sesión: señalización de otra llamada (id distinto) se ignora', async ()
   await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-9999999999999999', op: 'end', media: 'audio' })));
   assert.equal(ses.state, 'saliendo', 'un end ajeno no cuelga mi llamada');
   assert.equal(eventos.filter((e) => e.tipo === 'terminada').length, 0);
+});
+
+// ------------------------------------------------- fix v1.8.1: fantasmas
+
+test('offerEsFresca: ventana de 60 s atrás y 120 s adelante, con bordes', () => {
+  const now = 1_000_000;
+  assert.equal(offerEsFresca(now, now), true, 'recién creada');
+  assert.equal(offerEsFresca(now - 59, now), true, '59 s: fresca');
+  assert.equal(offerEsFresca(now - 60, now), true, '60 s exactos: fresca');
+  assert.equal(offerEsFresca(now - 61, now), false, '61 s: vieja, es un eco');
+  assert.equal(offerEsFresca(now - 3600, now), false, 'una hora: fantasma');
+  assert.equal(offerEsFresca(now + 119, now), true, '119 s de futuro: reloj adelantado, pasa');
+  assert.equal(offerEsFresca(now + 121, now), false, '121 s de futuro: absurdo');
+  assert.equal(offerEsFresca(0, now), false);
+  assert.equal(offerEsFresca(undefined, now), false);
+  assert.equal(offerEsFresca(now, NaN), false);
+  assert.equal(offerEsFresca('basura', now), false);
+});
+
+test('sesión: la MISMA offer reentregada mientras suena no manda reject ocupado ni suena dos veces', async () => {
+  const { ses, sent, eventos } = mkSession();
+  const offer = parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' }));
+  await ses.recibir('peerPK', offer);
+  assert.equal(ses.state, 'entrante');
+  // El pool la entrega otra vez (segundo relay): silencio total.
+  await ses.recibir('peerPK', offer);
+  await ses.recibir('peerPK', offer);
+  assert.equal(ses.state, 'entrante', 'sigue sonando la misma llamada');
+  assert.equal(eventos.filter((e) => e.tipo === 'entrante').length, 1, 'sonó una sola vez');
+  assert.equal(sent.filter((s) => s.payload.op === 'reject').length, 0, 'NADA de reject ocupado por un duplicado');
+});
+
+test('sesión: offer reproducida tras cerrarse la llamada no resucita (dedup por callId)', async () => {
+  const { ses, eventos } = mkSession();
+  const offer = parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' }));
+  await ses.recibir('peerPK', offer);
+  ses.rechazar(); // la llamada se cierra de verdad
+  assert.equal(ses.state, 'idle');
+  const antes = eventos.length;
+  // Un relay que la almacenó la reentrega al reconectar: no suena.
+  await ses.recibir('peerPK', offer);
+  assert.equal(ses.state, 'idle', 'no resucitó');
+  assert.equal(eventos.slice(antes).filter((e) => e.tipo === 'entrante').length, 0);
+});
+
+test('sesión: el eco de mi propia offer (mismo callId que mi saliente) no me suena ni me la cuelga', async () => {
+  const { ses, sent, eventos } = mkSession();
+  await ses.llamar('peerPK', 'audio'); // mi llamada saliente tiene id ID
+  // Un relay me reentrega mi propia offer como si viniera del par:
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'offer', media: 'audio', sdp: 'SDP-OFFER' })));
+  assert.equal(ses.state, 'saliendo', 'mi saliente sigue viva');
+  assert.equal(eventos.filter((e) => e.tipo === 'entrante').length, 0, 'nunca sonó como entrante');
+  assert.equal(sent.filter((s) => s.payload.op === 'reject').length, 0);
+});
+
+test('sesión: ICE que llega ANTES que la offer se aplica al aceptar (conecta igual)', async () => {
+  const { ses } = mkSession();
+  const idX = 'call-1111111122222222';
+  // Los relays no garantizan orden: primero el ICE, sin sesión aún.
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'ice', media: 'audio', candidate: { candidate: 'candidate:temprano' } })));
+  assert.equal(ses.state, 'idle');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP-REMOTA' })));
+  assert.equal(ses.state, 'entrante');
+  assert.equal(await ses.aceptar(), true);
+  assert.equal(ses.pc.remoteDescription.sdp, 'SDP-REMOTA');
+  assert.deepEqual(ses.pc.candidates, [{ candidate: 'candidate:temprano' }], 'el ICE buferizado se aplicó tras setRemoteDescription');
+});
+
+test('sesión: ICE que llega DURANTE el timbre (aún sin pc) no se pierde', async () => {
+  const { ses } = mkSession();
+  const idX = 'call-3333333344444444';
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP-REMOTA' })));
+  // Suena el teléfono; el llamante ya manda candidatos y el pc del
+  // receptor aún no existe (nace al aceptar): antes se descartaban.
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'ice', media: 'audio', candidate: { candidate: 'candidate:del-timbre' } })));
+  assert.equal(await ses.aceptar(), true);
+  assert.deepEqual(ses.pc.candidates, [{ candidate: 'candidate:del-timbre' }], 'el ICE del timbre se aplicó al aceptar');
+});
+
+test('sesión: buffer de ICE huérfano caduca (TTL) y no contamina llamadas posteriores', async () => {
+  const { ses, avanzar } = mkSession();
+  const idViejo = 'call-5555555566666666';
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idViejo, op: 'ice', media: 'audio', candidate: { candidate: 'candidate:stale' } })));
+  avanzar(61000); // pasa el TTL de 60 s
+  // Llega otra señalización cualquiera: la poda corre y el buffer murió.
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idViejo, op: 'ice', media: 'audio', candidate: { candidate: 'candidate:nuevo' } })));
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idViejo, op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(await ses.aceptar(), true);
+  assert.deepEqual(ses.pc.candidates, [{ candidate: 'candidate:nuevo' }], 'solo entró el candidato vivo, no el caducado');
 });
 
 // ------------------------------------------------------------ smoke jsdom
@@ -447,5 +545,68 @@ test('smoke: offer de un NO-match se ignora en silencio', async () => {
   }, skA);
   await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
   assert.equal(document.getElementById('call-overlay'), null, 'sin overlay para no-matches');
+  T.stopCalls();
+});
+
+// ------------------------------------------------- fix v1.8.1: fantasmas
+
+async function offerEvent(id, createdAt, fromSk = skA, toPk = pkB) {
+  const payload = { t: 'call', v: 1, id, op: 'offer', media: 'audio', sdp: 'SDP-DE-A' };
+  return finalizeEvent({
+    kind: KIND_CALL, created_at: createdAt,
+    tags: [['p', toPk]], content: await nip04.encrypt(fromSk, toPk, JSON.stringify(payload)),
+  }, fromSk);
+}
+
+test('smoke: offer VIEJA reproducida por un relay (created_at de hace 1 h) no suena', async () => {
+  prepararChat(0, { apodo: 'Ana', videoOk: true });
+  T.setCallDeps({
+    send: async () => {},
+    createPC: () => new FakePC(),
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  const haceUnaHora = Math.floor(Date.now() / 1000) - 3600;
+  const ev = await offerEvent('call-7777777788888888', haceUnaHora);
+  await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
+  assert.equal(document.getElementById('call-overlay'), null, 'la offer fantasma no abrió overlay');
+  T.stopCalls();
+});
+
+test('smoke: la misma offer entregada dos veces (multi-relay) suena una vez y no manda "ocupado"', async () => {
+  prepararChat(0, { apodo: 'Ana', videoOk: true });
+  const captured = [];
+  T.setCallDeps({
+    send: async (peer, payload) => { captured.push({ peer, payload }); },
+    createPC: () => new FakePC(),
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  const ev = await offerEvent('call-1212121234343434', Math.floor(Date.now() / 1000));
+  const evJson = JSON.parse(JSON.stringify(ev));
+  await T.handleCallSignalEvent(evJson);
+  assert.ok(document.getElementById('call-overlay'), 'la primera entrega sí suena');
+  await T.handleCallSignalEvent(evJson); // el segundo relay la trae otra vez
+  assert.ok(document.getElementById('call-overlay'), 'sigue sonando la misma llamada');
+  const ocupado = captured.find((c) => c.payload.op === 'reject' && c.payload.motivo === 'ocupado');
+  assert.equal(ocupado, undefined, 'el duplicado NO generó un reject "ocupado" al llamante');
+  document.querySelector('[data-call="rechazar"]').click();
+  await wait(30);
+  T.stopCalls();
+});
+
+test('smoke: mi PROPIA offer (autor = yo) jamás me suena como entrante', async () => {
+  const s = prepararChat(0, { apodo: 'Ana', videoOk: true });
+  T.setCallDeps({
+    send: async () => {},
+    createPC: () => new FakePC(),
+    getLocalStream: async (media) => new FakeStream(media),
+  });
+  T.stopCalls(); T.startCalls();
+  // Evento firmado por MÍ (skB = mi clave en esta sesión de test):
+  // un relay me lo reentrega como si fuera entrante.
+  const ev = await offerEvent('call-9999000011112222', Math.floor(Date.now() / 1000), skB, pkA);
+  await T.handleCallSignalEvent(JSON.parse(JSON.stringify(ev)));
+  assert.equal(document.getElementById('call-overlay'), null, 'mi propia señalización no me suena');
   T.stopCalls();
 });
