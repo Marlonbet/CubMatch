@@ -25,12 +25,16 @@ import {
   mergePerfiles, mergeLikes,
 } from './cubmatch.js';
 import {
-  newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI,
+  newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI, MIN_COMPLETITUD,
   PROVINCIAS, GENEROS, ORIENTACIONES, COMPLEXIONES, OJOS, PIEL, CABELLO,
   EDUCACION, SECTORES, VALORES, INTERESES, RASGOS, RELACIONES, DISTANCIAS,
   PROMPTS, MAX_BIO, MAX_TAGS,
 } from './perfil.js';
-import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel, GATE_FLOOR } from './matching.js';
+import {
+  TEXTO_LIMITE_EXPL, TEXTO_LIMITE_AVISO, TEXTO_LIMITE_CORTE,
+  GRACIA_LIMITE_MS, conUso, agotado, textoRestante,
+} from './tiempollamadas.js';
+import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel } from './matching.js';
 import { preparePhotoBlob, uploadPhoto } from './foto.js';
 import {
   parseChatPayload, buildLocPayload, buildStickerPayload, osmUrl, geoErrorTexto,
@@ -89,7 +93,7 @@ const LS = {
 // ---------- estado global ----------
 const S = {
   pool: null, sk: null, pubkey: null, username: null, npub: null,
-  miPerfil: null, borrador: null, obPaso: 1,
+  miPerfil: null, perfilPublicado: false, borrador: null, obPaso: 1,
   vistos: {}, bloqueados: [],
   datosBajos: false, relayStatus: {},
   data: null,            // {perfiles, likes, corpus, ctx, me}
@@ -177,7 +181,7 @@ export function boot() {
   if (root) root.innerHTML = '';
   Object.assign(S, {
     sk: null, pubkey: null, username: null, npub: null,
-    miPerfil: null, borrador: null, obPaso: 1,
+    miPerfil: null, perfilPublicado: false, borrador: null, obPaso: 1,
     data: null, candidatos: [], idx: 0, leGustas: [], top: [],
     chats: {}, chatPeer: null, stickerEdit: false, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
     relayStatus: {},
@@ -254,18 +258,35 @@ function compatTxt(c) {
 function compatCls(c) {
   return 'compat ' + compatTxt(c).toLowerCase();
 }
+// Sugerencias pendientes de la pestaña 🔔: una por cada campo que
+// falta del perfil (la misma cuenta que alimenta la pantalla de
+// sugerencias). Se calcula en vivo en cada render de la navegación,
+// así la insignia se actualiza al entrar y tras editar el perfil.
+function numSugerencias() {
+  if (!S.miPerfil) return 0;
+  return camposFaltantes(S.miPerfil).length;
+}
 function navHTML(active) {
   const tabs = [
     ['deck', 'Descubrir', '🔥'],
     ['top10', 'Top 10', '⭐'],
     ['matches', 'Matches', '💬'],
+    // Pestaña de sugerencias (v1.10.0): SOLO el símbolo 🔔, sin
+    // texto, con insignia del nº de sugerencias pendientes.
+    ['avisos', '', '🔔'],
     ['ajustes', 'Ajustes', '⚙️'],
   ];
-  return '<nav class="tabnav" aria-label="Navegación principal">' + tabs.map(([id, label, ico]) =>
-    '<button type="button" class="tab' + (active === id ? ' active' : '') + '" data-act="nav-' + id + '"' +
-    (active === id ? ' aria-current="page"' : '') + '>' +
-    '<span class="tico" aria-hidden="true">' + ico + '</span><span>' + label + '</span></button>'
-  ).join('') + '</nav>';
+  return '<nav class="tabnav" aria-label="Navegación principal">' + tabs.map(([id, label, ico]) => {
+    const badge = id === 'avisos' ? numSugerencias() : 0;
+    const aria = id === 'avisos'
+      ? 'Sugerencias' + (badge ? ' (' + badge + ' pendientes)' : '')
+      : label;
+    return '<button type="button" class="tab' + (active === id ? ' active' : '') + '" data-act="nav-' + id + '"' +
+      (active === id ? ' aria-current="page"' : '') + ' aria-label="' + aria + '">' +
+      '<span class="tico" aria-hidden="true">' + ico +
+      (badge ? '<span class="tab-badge" aria-hidden="true">' + badge + '</span>' : '') + '</span>' +
+      (label ? '<span>' + label + '</span>' : '') + '</button>';
+  }).join('') + '</nav>';
 }
 function pantallaShell(active, inner) {
   return '<div class="screen has-nav"><div class="scroll">' + inner + '</div>' + navHTML(active) + '</div>';
@@ -288,6 +309,12 @@ function marcarSuperlike() {
 }
 
 // ---------- 1. inicio ----------
+// Landing (v1.10.0): presenta la app SIN robarle prioridad a las
+// acciones principales — héroe compacto (marca + 4 características
+// en viñetas cortas) y los botones Crear cuenta / Ya tengo cuenta
+// visibles sin hacer scroll en un móvil típico. El "¿Cómo
+// funciona?" y el "¿Qué es Nostr?" quedan debajo, como explicación.
+// Con sesión activa esta pantalla nunca se ve: boot entra directo.
 function showInicio() {
   setScreenScope(null);
   S.screen = 'inicio';
@@ -296,6 +323,19 @@ function showInicio() {
     '<div class="screen inicio" id="pantalla-inicio">' +
     '<div class="brand"><div class="logo">' + logoSVG(84) + '</div><h1>CubMatch</h1>' +
     '<p class="tagline">Conoce gente en Cuba, sin intermediarios.<br>Directo, gratis y sin VPN.</p></div>' +
+    '<ul class="hero-features" aria-label="Características de CubMatch">' +
+    '<li><span aria-hidden="true">🇨🇺</span><span>Perfiles de toda Cuba</span></li>' +
+    '<li><span aria-hidden="true">🔒</span><span>Chat privado y cifrado</span></li>' +
+    '<li><span aria-hidden="true">📞</span><span>Llamadas de voz y video</span></li>' +
+    '<li><span aria-hidden="true">🆓</span><span>Gratis y sin intermediarios</span></li>' +
+    '</ul>' +
+    '<div class="inicio-btns">' +
+    '<button type="button" class="btn primary big" data-act="ir-registro">Crear cuenta</button>' +
+    '<button type="button" class="btn ghost big" data-act="ir-login">Ya tengo cuenta</button>' +
+    '<button type="button" class="btn ghost big" data-act="compartir">📤 Compartir CubMatch</button>' +
+    '</div>' +
+    '<p class="netcount" id="netcount"' + (cached != null ? '' : ' hidden') + '>' +
+    (cached != null ? '💘 Ya hay <b>' + cached + '</b> perfiles publicados en la red' : '') + '</p>' +
     '<div class="inicio-logo-big" aria-hidden="true">' + logoSVG(230, 'big') + '</div>' +
     '<section class="como-funciona" aria-label="Cómo funciona">' +
     '<h3>¿Cómo funciona?</h3>' +
@@ -307,13 +347,6 @@ function showInicio() {
     '<details class="nostr-det"><summary>¿Qué es Nostr?</summary>' +
     '<p>La red abierta donde vive CubMatch. Como el correo electrónico, pero sin una empresa dueña: tu identidad es una llave que solo tú tienes.</p></details>' +
     '</section>' +
-    '<div class="inicio-btns">' +
-    '<button type="button" class="btn primary big" data-act="ir-registro">Crear cuenta</button>' +
-    '<button type="button" class="btn ghost big" data-act="ir-login">Ya tengo cuenta</button>' +
-    '<button type="button" class="btn ghost big" data-act="compartir">📤 Compartir CubMatch</button>' +
-    '</div>' +
-    '<p class="netcount" id="netcount"' + (cached != null ? '' : ' hidden') + '>' +
-    (cached != null ? '💘 Ya hay <b>' + cached + '</b> perfiles publicados en la red' : '') + '</p>' +
     '<nav class="foot-links" aria-label="Información">' +
     '<button type="button" class="link" data-act="info-seguridad">🛡️ Seguridad</button>' +
     '<span aria-hidden="true">·</span>' +
@@ -523,12 +556,17 @@ async function enterApp(username, sk) {
   try { mine = await fetchMyPerfil(); } catch {}
   if (mine && mine.profile) {
     S.miPerfil = mine.profile;
-    showDeck();
+    S.perfilPublicado = true;
   } else {
+    // Sin perfil publicado (o sin red para leerlo): NUNCA se abre
+    // solo el asistente de completar perfil (v1.10.0, era lo que
+    // molestaba al entrar). Se entra a la app con el borrador local
+    // y las sugerencias viven en la pestaña 🔔.
     S.borrador = LS.get('perfil', null) || newProfile();
-    S.obPaso = 1;
-    showOnboarding();
+    S.miPerfil = S.borrador;
+    S.perfilPublicado = false;
   }
+  showDeck();
   startCalls();
   startPresencia();
   migrarInboxSiToca();
@@ -549,12 +587,14 @@ async function restoreSession(ses) {
     try { mine = await fetchMyPerfil(); } catch {}
     if (mine && mine.profile) {
       S.miPerfil = mine.profile;
-      showDeck();
+      S.perfilPublicado = true;
     } else {
+      // Igual que en enterApp: sin asistente automático (v1.10.0).
       S.borrador = LS.get('perfil', null) || newProfile();
-      S.obPaso = 1;
-      showOnboarding();
+      S.miPerfil = S.borrador;
+      S.perfilPublicado = false;
     }
+    showDeck();
     startCalls();
     startPresencia();
     migrarInboxSiToca();
@@ -871,6 +911,7 @@ async function obSiguiente() {
     S.borrador.oculto = !!(S.miPerfil && S.miPerfil.oculto);
     await publishPerfilAndDocs(S.borrador);
     S.miPerfil = clone(S.borrador);
+    S.perfilPublicado = true;
     LS.set('perfil', S.borrador);
     toast('¡Tu perfil ya está en la red! 🎉');
     showDeck();
@@ -1000,52 +1041,60 @@ function showDeck() {
   stopChat();
   S.screen = 'deck';
   if (!S.miPerfil) {
-    S.borrador = LS.get('perfil', null) || newProfile();
-    S.obPaso = 1;
-    showOnboarding();
-    return;
+    // Red de seguridad: sin perfil a mano se entra con el borrador
+    // local — jamás se abre solo el asistente (v1.10.0).
+    S.miPerfil = LS.get('perfil', null) || newProfile();
+    S.perfilPublicado = false;
   }
   $('#app').innerHTML = pantallaShell('deck',
     '<div class="deck-head"><div class="deck-title">' + logoSVG(30, 'deck') + '<div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div></div>' +
-    '<div id="deck-guia">' + guiaHTML() + '</div>' +
+    '<div id="deck-aviso">' + avisoMatchingHTML() + '</div>' +
     '<div id="deck-legustas"></div>' +
     '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
   loadDeck();
 }
 
-// Guía "Completa tu perfil" + aviso de matching: se calcula con la
-// lógica de completitud de perfil.js. La tarjeta se puede descartar
-// (queda guardado) y desaparece sola al llegar a 100%. Desde el motor
-// v2 el perfil aparece en el mazo a partir del suelo del gate (40% de
-// completitud, GATE_FLOOR); por debajo de eso el aviso es persistente.
-function guiaHTML() {
+// Aviso de matching en Descubrir (v1.10.0): UNA sola línea discreta
+// si el perfil aún no llega al 70% (por debajo no aparece en el
+// matching). Sustituye a la antigua tarjeta "Completa tu perfil" y
+// a su banner: las sugerencias completas viven ahora en la 🔔.
+function avisoMatchingHTML() {
   if (!S.miPerfil) return '';
   const pct = completitud(S.miPerfil);
-  const umbral = Math.round(GATE_FLOOR * 100);
-  let html = '';
-  if (pct < umbral) {
-    html += '<div class="banner-warn" role="alert">⚠️ <b>Tu perfil aún no aparece en el matching</b> — ' +
-      'te falta ' + (umbral - pct) + '% para llegar al ' + umbral + '%. ' +
-      '<button type="button" class="link strong" data-act="guia-ir" data-paso="1">Completar mi perfil</button></div>';
-  }
-  if (pct < 100 && !LS.get('guiaDescartada', false)) {
-    const faltan = camposFaltantes(S.miPerfil);
-    const visibles = faltan.slice(0, 6);
-    const resto = faltan.length - visibles.length;
-    html += '<section class="guia-card" id="guia-card" aria-label="Completa tu perfil">' +
-      '<button type="button" class="x guia-x" data-act="guia-cerrar" aria-label="Cerrar guía">✕</button>' +
-      '<h3>Completa tu perfil 💪</h3>' +
-      '<p class="muted">Vas por el <b>' + pct + '%</b>. Un perfil completo recibe muchos más likes.</p>' +
-      '<div class="prog"><div class="prog-fill" style="width:' + pct + '%"></div></div>' +
+  if (pct >= MIN_COMPLETITUD) return '';
+  return '<p class="deck-aviso">📣 Tu perfil aún no aparece en el matching (' + pct +
+    '% completo). Mira las sugerencias en la pestaña 🔔 para terminarlo.</p>';
+}
+
+// ---------- pestaña 🔔: sugerencias de la página (v1.10.0) ----------
+// Una sugerencia por cada cosa que falta del perfil (la misma
+// cuenta de la insignia), cada una con su botón Completar que salta
+// al paso correcto del editor. Perfil completo → estado amable.
+function showAvisos() {
+  setScreenScope('discovery');
+  stopChat();
+  S.screen = 'avisos';
+  const p = S.miPerfil;
+  const pct = p ? completitud(p) : 0;
+  const faltan = p ? camposFaltantes(p) : [];
+  let inner = '<div class="aj-wrap"><h2>🔔 Sugerencias</h2>';
+  if (!faltan.length) {
+    inner += '<div class="center-pad"><p class="big">🎉</p>' +
+      '<p><b>Tu perfil está completo 🎉</b></p>' +
+      '<p class="muted">No tienes sugerencias pendientes. ¡A conocer gente!</p></div>';
+  } else {
+    inner += '<p class="muted">Tu perfil va por el <b>' + pct + '%</b>. Esto es lo que te falta — ' +
+      'toca <b>Completar</b> y saltas justo a ese paso:</p>' +
+      '<div class="prog" style="margin:10px 0 14px"><div class="prog-fill" style="width:' + pct + '%"></div></div>' +
       '<ul class="guia-list">' +
-      visibles.map((f) =>
+      faltan.map((f) =>
         '<li class="guia-item"><span>' + esc(f.label) + '</span>' +
-        '<button type="button" class="btn ghost sm" data-act="guia-ir" data-paso="' + f.paso + '">Completar</button></li>'
+        '<button type="button" class="btn ghost sm" data-act="sug-ir" data-paso="' + f.paso + '">Completar</button></li>'
       ).join('') +
-      (resto > 0 ? '<li class="guia-item mas"><span>…y ' + resto + ' cosa' + (resto > 1 ? 's' : '') + ' más</span></li>' : '') +
-      '</ul></section>';
+      '</ul>';
   }
-  return html;
+  inner += '</div>';
+  $('#app').innerHTML = pantallaShell('avisos', inner);
 }
 
 function irAPasoEditor(paso) {
@@ -2326,6 +2375,46 @@ function showCallOverlay(modo, peer, media) {
   callAttachStreams();
 }
 
+// ---------- presupuesto de llamadas por relevo (v1.10.0) ----------
+// La cubeta mensual vive en localStorage POR CUENTA (pubkey) y por
+// mes (la clave de mes y la aritmética son de tiempollamadas.js).
+// Solo descuenta el tiempo en que la llamada conectada va por
+// relevo: la CallSession lo reporta con eventos 'relevo'.
+function usoRelevoKey() { return S.pubkey ? 'uso_relevo:' + S.pubkey : null; }
+function usoRelevoReg() {
+  const k = usoRelevoKey();
+  return k ? LS.get(k, null) : null;
+}
+function usoRelevoSumar(deltaMs) {
+  const k = usoRelevoKey();
+  if (!k || !(deltaMs > 0)) return usoRelevoReg();
+  const reg = conUso(usoRelevoReg(), deltaMs, Date.now());
+  LS.set(k, reg);
+  return reg;
+}
+
+// Estado de la gracia del límite: aviso dado, corte en
+// GRACIA_LIMITE_MS si la llamada sigue viva.
+let limiteGracia = null; // {id, timer}
+function gestionarRelevo(e) {
+  const reg = usoRelevoSumar(e.deltaMs);
+  if (!agotado(reg, Date.now())) return;
+  if (limiteGracia && limiteGracia.id === e.id) return; // ya avisado en esta llamada
+  toast(TEXTO_LIMITE_AVISO, 6000);
+  const id = e.id;
+  const timer = setTimeout(() => {
+    limiteGracia = null;
+    if (callSession && callSession.current && callSession.current.id === id) {
+      callSession.terminarPorLimite();
+    }
+  }, GRACIA_LIMITE_MS);
+  S.timers.push(timer);
+  limiteGracia = { id, timer };
+}
+function cancelarGraciaLimite() {
+  if (limiteGracia) { clearTimeout(limiteGracia.timer); limiteGracia = null; }
+}
+
 function onCallEvent(e) {
   if (!e || !e.tipo) return;
   if (e.tipo === 'entrante') {
@@ -2335,6 +2424,8 @@ function onCallEvent(e) {
     showCallOverlay('saliendo', e.peer, e.media);
   } else if (e.tipo === 'stream-local' || e.tipo === 'stream-remoto') {
     callAttachStreams();
+  } else if (e.tipo === 'relevo') {
+    gestionarRelevo(e);
   } else if (e.tipo === 'conectada') {
     const est = document.getElementById('call-estado');
     if (est) est.textContent = 'En llamada · ' + fmtDuracion(callSession ? callSession.duracionSeg() : 0);
@@ -2345,11 +2436,16 @@ function onCallEvent(e) {
     }, 500);
     S.timers.push(callUiTimer);
   } else if (e.tipo === 'terminada') {
+    cancelarGraciaLimite();
     closeCallOverlay();
     const nombre = callNombre(e.peer);
     switch (e.resultado) {
       case 'completada':
         registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
+        break;
+      case 'limite':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
+        toast(TEXTO_LIMITE_CORTE, 9000);
         break;
       case 'perdida':
         registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'perdida' }));
@@ -2408,6 +2504,8 @@ function showAjustes() {
     '<section class="aj-sec"><h3>Llamadas</h3>' +
     '<p class="muted small">Con tus matches puedes hablar por <b>voz</b> desde el primer mensaje. El <b>video</b> pide tres acuerdos: haber conversado ya (10+ mensajes en el chat), que actives esta opción y que aceptes cada videollamada cuando suene.</p>' +
     '<label class="check"><input type="checkbox" id="aj-videook"' + (S.miPerfil && S.miPerfil.videoOk ? ' checked' : '') + '> Acepto videollamadas <small class="muted">(tu preferencia viaja en tu perfil publicado, para que quien te llame la pueda ver)</small></label>' +
+    '<p class="small" style="margin-top:12px"><b>' + esc(textoRestante(usoRelevoReg(), Date.now())) + '</b></p>' +
+    '<p class="muted small">' + TEXTO_LIMITE_EXPL + '</p>' +
     '</section>' +
     '<section class="aj-sec"><h3>Compartir</h3>' +
     '<p class="muted small">Mientras más gente conozca CubMatch, mejores matches para todos.</p>' +
@@ -2418,7 +2516,7 @@ function showAjustes() {
     '<button type="button" class="btn ghost sm" data-act="info-terminos">📄 Términos y privacidad</button>' +
     '</div></section>' +
     '<section class="aj-sec"><h3>Mi perfil</h3>' +
-    '<p class="muted small">' + (S.miPerfil ? esc(S.miPerfil.apodo || '') + ' · ' + completitud(S.miPerfil) + '% completo' : 'Sin perfil publicado') +
+    '<p class="muted small">' + (S.perfilPublicado && S.miPerfil ? esc(S.miPerfil.apodo || '') + ' · ' + completitud(S.miPerfil) + '% completo' : 'Sin perfil publicado') +
     (S.miPerfil && S.miPerfil.oculto ? ' · <b>oculto</b>' : '') + '</p>' +
     '<div class="row-btns">' +
     '<button type="button" class="btn primary sm" data-act="aj-editar">Editar</button>' +
@@ -2448,7 +2546,7 @@ function showAjustes() {
 // Mismo patrón que toggleOculto: cambio optimista + republicar; si la
 // red falla, se revierte.
 async function toggleVideoOk(ok) {
-  if (!S.miPerfil) { toast('Primero publica tu perfil.'); showAjustes(); return; }
+  if (!S.perfilPublicado || !S.miPerfil) { toast('Primero publica tu perfil.'); showAjustes(); return; }
   S.miPerfil.videoOk = !!ok;
   try {
     await publishPerfilAndDocs(S.miPerfil);
@@ -2474,6 +2572,7 @@ async function publicarActualizacion() {
     d.oculto = !!(S.miPerfil && S.miPerfil.oculto);
     await publishPerfilAndDocs(d);
     S.miPerfil = clone(d);
+    S.perfilPublicado = true;
     LS.set('perfil', d);
     toast('Perfil actualizado ✓');
     showAjustes();
@@ -2483,7 +2582,7 @@ async function publicarActualizacion() {
 }
 
 async function toggleOculto(ocultar) {
-  if (!S.miPerfil) { toast('Primero publica tu perfil.'); return; }
+  if (!S.perfilPublicado || !S.miPerfil) { toast('Primero publica tu perfil.'); return; }
   try {
     S.miPerfil.oculto = ocultar;
     await publishPerfilAndDocs(S.miPerfil);
@@ -2665,13 +2764,9 @@ const ACTIONS = {
   'nav-deck': () => showDeck(),
   'nav-top10': () => showTop10(),
   'nav-matches': () => showMatches(),
+  'nav-avisos': () => showAvisos(),
   'nav-ajustes': () => showAjustes(),
-  'guia-ir': (el) => irAPasoEditor(Number(el.dataset.paso) || 1),
-  'guia-cerrar': () => {
-    LS.set('guiaDescartada', true);
-    const card = $('#guia-card');
-    if (card) card.remove();
-  },
+  'sug-ir': (el) => irAPasoEditor(Number(el.dataset.paso) || 1),
   'grid-si': (el) => gridAction(el.dataset.peer, 'si'),
   'grid-super': (el) => gridAction(el.dataset.peer, 'super'),
   'grid-no': (el) => gridAction(el.dataset.peer, 'no'),
@@ -2754,7 +2849,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: () => usoRelevoReg(), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

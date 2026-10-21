@@ -53,12 +53,24 @@
 //   sabe antes de marcar (su app lee el perfil) y el receptor, por
 //   si el dato del llamante estaba viejo, rechaza en silencio.
 //
+// Presupuesto de relevo (v1.10.0): la app es para mucho público y
+// el relevo tiene un cupo gratuito mensual compartido. Mientras la
+// llamada está conectada, la sesión muestrea las estadísticas del
+// pc cada ~10 s: si el par seleccionado es de tipo `relay`, ese
+// tiempo se reporta con eventos 'relevo' (deltaMs) y la app lo
+// descuenta del presupuesto mensual de la persona (la cubeta y los
+// textos viven en tiempollamadas.js). Lo directo (host/srflx) NO
+// descuenta. Si el presupuesto se agota, la app avisa, da una
+// gracia corta y llama a terminarPorLimite().
+//
 // Este módulo es casi puro (sin DOM): la máquina de estados recibe
 // el transporte (send), la fábrica de RTCPeerConnection, getUserMedia
 // y el proveedor de configuración ICE inyectados, para probarla en
-// Node con falsos. La única dependencia es turnmd.js (también puro).
+// Node con falsos. Las únicas dependencias son turnmd.js y
+// tiempollamadas.js (también puros).
 
 import { getMeteredIceServers } from './turnmd.js';
+import { tipoDelParSeleccionado, MUESTREO_RELEVO_MS } from './tiempollamadas.js';
 
 export const KIND_CALL = 21004; // efímero: señalización de llamada
 export const CALL_V = 1;
@@ -307,9 +319,10 @@ export function textoRegistroLlamada({ media, resultado, durSeg } = {}) {
 //   {tipo:'stream-local',  stream}
 //   {tipo:'stream-remoto', stream}
 //   {tipo:'conectada', peer, media, id}
+//   {tipo:'relevo', peer, media, id, deltaMs}  (tiempo por relevo a descontar)
 //   {tipo:'terminada', peer, media, id, durSeg, resultado, mensaje?}
 // resultado: 'completada' | 'perdida' | 'sin-respuesta' | 'rechazada'
-//          | 'ocupado' | 'sin-conexion' | 'error'
+//          | 'ocupado' | 'sin-conexion' | 'error' | 'limite'
 export class CallSession {
   constructor({ send, createPC, getLocalStream, onEvent, setTimeoutFn, clearTimeoutFn, nowFn, rng, getIceServers } = {}) {
     if (typeof send !== 'function') throw new Error('CallSession: falta send');
@@ -338,6 +351,8 @@ export class CallSession {
     this._ringTimer = null;      // timbre (saliendo o entrante)
     this._connectTimer = null;   // plazo para que `conectando` conecte
     this._iceWatchdog = null;    // gracia de ICE `disconnected`
+    this._statsTimer = null;     // muestreo de relevo (v1.10.0)
+    this._ultimaMuestra = 0;     // instante de la última muestra de stats
     this._iceQueue = [];
     this._stateSince = this._now(); // nacimiento del estado actual
     // Defensa ante reentregas de los relays (el mismo evento llega
@@ -394,11 +409,13 @@ export class CallSession {
   _disarmRingTimer() { this._disarmTimer('_ringTimer'); }
   _disarmConnectTimer() { this._disarmTimer('_connectTimer'); }
   _disarmIceWatchdog() { this._disarmTimer('_iceWatchdog'); }
+  _disarmStatsTimer() { this._disarmTimer('_statsTimer'); }
 
   _disarmAllTimers() {
     this._disarmRingTimer();
     this._disarmConnectTimer();
     this._disarmIceWatchdog();
+    this._disarmStatsTimer();
   }
 
   // Cierre local SIN avisar ni emitir (logout, cambio de cuenta).
@@ -578,6 +595,51 @@ export class CallSession {
     });
   }
 
+  // ------------------------------------------------- muestreo de relevo (v1.10.0)
+
+  // Mientras la llamada está conectada, cada MUESTREO_RELEVO_MS se
+  // mira el par de candidatos seleccionado: si es `relay`, el
+  // tiempo desde la muestra anterior se reporta como evento
+  // 'relevo' (la app lo descuenta del presupuesto mensual de la
+  // persona; ver tiempollamadas.js). Sin getStats (RTC falso de
+  // tests viejos) el muestreo se apaga en silencio. El delta se
+  // capa a 2 intervalos: si el teléfono durmió, no se inventa
+  // tiempo que no se vivió despierto.
+  _iniciarMuestreo(cur) {
+    this._ultimaMuestra = this._now();
+    this._armTimer('_statsTimer', MUESTREO_RELEVO_MS, () => { void this._muestrear(cur); });
+  }
+
+  async _muestrear(cur) {
+    if (this.current !== cur || this.state !== 'conectada' || !this.pc) return;
+    const ahora = this._now();
+    const delta = ahora - this._ultimaMuestra;
+    this._ultimaMuestra = ahora;
+    if (typeof this.pc.getStats === 'function' && delta > 0) {
+      let tipo = null;
+      try { tipo = tipoDelParSeleccionado(await this.pc.getStats()); } catch {}
+      if (this.current === cur && tipo === 'relay') {
+        this._emit({
+          tipo: 'relevo', peer: cur.peer, media: cur.media, id: cur.id,
+          deltaMs: Math.min(delta, MUESTREO_RELEVO_MS * 2),
+        });
+      }
+    }
+    if (this.current === cur && this.state === 'conectada') {
+      this._armTimer('_statsTimer', MUESTREO_RELEVO_MS, () => { void this._muestrear(cur); });
+    }
+  }
+
+  // Corte por presupuesto de relevo agotado: lo invoca la app tras
+  // la gracia (el aviso y los textos los pone ella). Avisa al par
+  // con un `end` normal: para el otro lado es un cierre cordial.
+  terminarPorLimite() {
+    const cur = this.current;
+    if (!cur || this.state === 'idle') return;
+    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+    this._terminar('limite');
+  }
+
   // ------------------------------------------------- restart de ICE
 
   // Pide la configuración ICE de nuevo y la aplica al pc en curso
@@ -692,6 +754,7 @@ export class CallSession {
           this._disarmConnectTimer();
           this._disarmIceWatchdog();
           this._emit({ tipo: 'conectada', peer: cur.peer, media: cur.media, id: cur.id });
+          this._iniciarMuestreo(cur); // presupuesto de relevo (v1.10.0)
         }
       } else if (st === 'failed') {
         this._onIceFailed(cur);

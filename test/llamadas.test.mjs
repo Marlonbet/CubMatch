@@ -482,12 +482,15 @@ test('sesión: watchdog de ICE — disconnected breve se perdona, sostenido cort
   await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
   ses.pc.setConnState('connected');
   assert.equal(ses.state, 'conectada');
-  assert.equal(timers.count(), 0, 'conectada no deja timers vivos');
+  // v1.10.0: en conectada vive UN temporizador legítimo, el
+  // muestreador de relevo (presupuesto de llamadas). Los demás
+  // (timbre, plazo, watchdog) deben estar muertos.
+  assert.equal(timers.count(), 1, 'conectada solo deja vivo el muestreador de relevo');
   // Un bache de red: disconnected… y se recupera antes de la gracia.
   ses.pc.setIceState('disconnected');
-  assert.equal(timers.count(), 1, 'watchdog armado');
+  assert.equal(timers.count(), 2, 'watchdog armado (más el muestreador)');
   ses.pc.setIceState('connected');
-  assert.equal(timers.count(), 0, 'watchdog desarmado al recuperarse');
+  assert.equal(timers.count(), 1, 'watchdog desarmado al recuperarse; queda el muestreador');
   assert.equal(ses.state, 'conectada');
   // Segundo bache, este sostenido: a la gracia, corte limpio.
   ses.pc.setIceState('disconnected');

@@ -162,6 +162,20 @@ h1, h2, h3 { letter-spacing: -0.02em; line-height: 1.15; text-wrap: balance; }
 .foot-links .link { font-size: 14px; font-weight: 600; }
 .inicio-logo-big { display: none; }
 
+/* héroe compacto (v1.10.0): características en viñetas cortas, sin
+   empujar los botones principales fuera de la primera pantalla */
+.hero-features {
+  list-style: none; margin: 18px 0 2px; padding: 0; width: 100%; max-width: 340px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.hero-features li {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  background: var(--superficie); border: 1px solid var(--borde);
+  border-radius: var(--radio-lg); padding: 10px 12px;
+  font-size: 13.5px; font-weight: 600; line-height: 1.3; color: var(--tierra);
+}
+.hero-features li span:first-child { font-size: 19px; line-height: 1; flex-shrink: 0; }
+
 /* cómo funciona + prueba social */
 .como-funciona {
   width: 100%; max-width: 340px; margin: 14px 0 6px; background: var(--superficie);
@@ -334,9 +348,18 @@ textarea { resize: vertical; }
   min-height: var(--nav-h);
 }
 .tab .tico {
+  position: relative;
   display: inline-flex; align-items: center; justify-content: center;
   width: 56px; height: 30px; border-radius: 999px; font-size: 20px; line-height: 1;
   transition: background-color 0.2s;
+}
+/* insignia de sugerencias pendientes sobre la 🔔 */
+.tab-badge {
+  position: absolute; top: -4px; right: 4px;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  background: var(--rojo); color: #fff; border-radius: 999px;
+  font-size: 11px; font-weight: 800; line-height: 18px; text-align: center;
+  box-shadow: 0 0 0 2px var(--superficie);
 }
 .tab.active { color: var(--rojo-txt); font-weight: 700; }
 .tab.active .tico { background: var(--rojo-tint); }
@@ -351,29 +374,20 @@ textarea { resize: vertical; }
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
-/* guía "Completa tu perfil" + aviso de matching */
-.banner-warn {
-  margin: 12px 14px 0; background: var(--aviso-bg); border: 1px solid var(--aviso-borde);
-  color: var(--tierra); border-radius: var(--radio-lg); padding: 14px 16px;
-  font-size: 14.5px; line-height: 1.5;
+/* línea discreta de matching en Descubrir (v1.10.0): sustituye a
+   la tarjeta "Completa tu perfil" y a su banner persistente */
+.deck-aviso {
+  margin: 12px 14px 0; padding: 10px 14px;
+  background: var(--superficie-2); border-radius: var(--radio-lg);
+  font-size: 13.5px; line-height: 1.45; color: var(--tierra-claro);
 }
-.guia-card {
-  margin: 12px 14px 0; background: var(--superficie); border: 1px solid var(--borde);
-  border-radius: var(--radio-lg); box-shadow: var(--sombra); padding: 18px; position: relative;
-}
-.guia-card h3 { margin: 0 34px 4px 0; color: var(--tierra); }
-.guia-card .muted { margin: 0 0 6px; font-size: 14px; }
-.guia-x {
-  position: absolute; top: 10px; right: 10px; border: none; background: var(--superficie-3);
-  width: 34px; height: 34px; border-radius: 50%; font-size: 14px; cursor: pointer; color: var(--tierra);
-}
+/* lista de sugerencias de la pestaña 🔔 (una fila por campo) */
 .guia-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .guia-item {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
   padding: 6px 8px 6px 14px; background: var(--superficie-2); border-radius: var(--radio-sm);
   font-size: 14.5px; color: var(--tierra);
 }
-.guia-item.mas { justify-content: center; color: var(--tierra-claro); font-size: 13.5px; }
 
 /* foto + compatibilidad */
 .t-foto { position: relative; background: var(--superficie-3); }
@@ -691,7 +705,7 @@ textarea { resize: vertical; }
     grid-template-columns: 1.05fr 0.95fr;
     grid-template-areas:
       "brand logobig"
-      "btns como"
+      "btns hero"
       "net como"
       "links links"
       "fine fine";
@@ -699,6 +713,7 @@ textarea { resize: vertical; }
     align-content: center; justify-items: stretch;
     text-align: left; padding: 48px 56px 36px;
   }
+  .inicio .hero-features { grid-area: hero; max-width: 480px; width: 100%; margin: 26px 0 0; justify-self: center; align-content: start; }
   .inicio .brand { grid-area: brand; text-align: left; }
   .inicio .brand .logo { display: none; } /* lo sustituye el logo grande */
   .inicio .brand h1 { font-size: 60px; }
@@ -721,7 +736,7 @@ textarea { resize: vertical; }
   .deck-grid .t-body { flex: 1; }
   .deck-grid .bio { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .deck-grid .t-actions { padding: 10px 18px 18px; }
-  #deck-guia { max-width: 720px; }
+  #deck-aviso { max-width: 720px; }
 
   /* formularios y ajustes más anchos */
   .form-wrap { max-width: 640px; }
