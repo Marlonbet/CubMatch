@@ -2,7 +2,7 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
-import { nip04 } from 'nostr-tools';
+import { nip04, getEventHash } from 'nostr-tools';
 import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido } from './red.js';
 import {
   KIND_CALL, CallSession, buildCallPayload, parseCallPayload,
@@ -37,6 +37,10 @@ import {
   loadStickers, addSticker, removeSticker,
   prepareStickerBlob, stickerPesoOk,
 } from './chatx.js';
+import { fusionarMensajes, estadoVisible, marcarColgados } from './mensajes.js';
+import {
+  KIND_PRESENCIA, BEACON_CADA_MS, textoPresencia, parseBeacon,
+} from './presencia.js';
 
 // ---------- utilidades ----------
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -93,7 +97,8 @@ const S = {
   leGustas: [],          // fila "Le gustas": [{other, ts}]
   top: [],
   perfilCache: new Map(),
-  chats: {},             // peerPubkey -> [{id,from,ts,text,read}]
+  chats: {},             // peerPubkey -> [{id,from,ts,text,read,estado?}]
+  presencia: {},         // pubkey -> {ts, off} (última vez visto, local)
   chatPeer: null, chatSubs: [],
   stickerEdit: false,    // panel de stickers en modo edición (borrar)
   cuentaModo: 'registro',
@@ -149,6 +154,7 @@ function stopChat() {
   for (const sub of S.chatSubs) { try { sub.unsub(); } catch {} }
   S.chatSubs = [];
   S.chatPeer = null;
+  stopPresenciaUi();
 }
 
 export function dispose() {
@@ -159,6 +165,7 @@ export function dispose() {
   netcountRun++; // invalida el contador en vuelo
   stopChat();
   stopCalls();
+  stopPresencia();
   setScreenScope(null);
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
@@ -189,6 +196,7 @@ export function boot() {
     S.vistos = vistosRaw && typeof vistosRaw === 'object' ? vistosRaw : {};
   }
   S.bloqueados = LS.get('bloqueados', []);
+  S.presencia = LS.get('presencia', {}) || {};
   S.datosBajos = LS.get('datosbajos', '0') === '1';
   // El inbox ajeno (NIP-17) se cachea en localStorage con TTL 24h.
   setInboxStore({ get: (k) => LS.get(k, null), set: (k, v) => LS.set(k, v) });
@@ -216,6 +224,9 @@ function wireEvents() {
     if (resizeT) clearTimeout(resizeT);
     resizeT = setTimeout(() => { if (S.screen === 'deck') renderDeckBody(); }, 200);
   });
+  // Al ocultar/cerrar la app, despedida de presencia (best-effort:
+  // el TTL de 2 min es la garantía real de que no quede "en línea").
+  window.addEventListener('pagehide', () => { if (S.sk) void publicarBeacon('off'); });
 }
 
 // ---------- helpers de UI ----------
@@ -516,6 +527,7 @@ async function enterApp(username, sk) {
     showOnboarding();
   }
   startCalls();
+  startPresencia();
 }
 
 async function restoreSession(ses) {
@@ -540,6 +552,7 @@ async function restoreSession(ses) {
       showOnboarding();
     }
     startCalls();
+    startPresencia();
   } catch {
     LS.del('sesion');
     showInicio();
@@ -1276,9 +1289,13 @@ function showMatchOverlay(peerPubkey) {
 }
 
 // ---------- detalle expandido + reportar/bloquear ----------
-function showDetalle(peerPubkey) {
+// Cuerpo con TODAS las características de un perfil (foto, edad,
+// ubicación, bio, datos, personalidad, valores/intereses/tags). Lo
+// comparten el overlay de Descubrir (showDetalle) y la pantalla de
+// perfil del match dentro del chat (showChatPerfil).
+function detalleCuerpoHTML(peerPubkey) {
   const entry = S.perfilCache.get(peerPubkey);
-  if (!entry) return;
+  if (!entry) return '';
   const p = entry.profile;
   const rasgos = RASGOS.map((r) => {
     const v = +(p.rasgos?.[r.id] ?? 3);
@@ -1289,12 +1306,7 @@ function showDetalle(peerPubkey) {
   const chips = (t, arr) => (arr && arr.length)
     ? '<p class="fld-label">' + t + '</p><div class="chips static">' + arr.map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('') + '</div>' : '';
   const dato = (l, v) => v ? '<div class="dato"><span>' + l + '</span><b>' + esc(v) + '</b></div>' : '';
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
-  ov.id = 'detalle-overlay';
-  ov.innerHTML = '<div class="sheet detalle" role="dialog" aria-label="Detalle del perfil">' +
-    '<button type="button" class="x" data-act="detalle-cerrar" aria-label="Cerrar detalle">✕</button>' +
-    avatarImg(peerPubkey, p, 'avatar big') +
+  return avatarImg(peerPubkey, p, 'avatar big') +
     '<h3>' + nombreEdad(p) + '</h3><p class="muted">📍 ' + lugar(p) + '</p>' +
     (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
     prompts +
@@ -1307,7 +1319,18 @@ function showDetalle(peerPubkey) {
     '</div>' +
     '<p class="fld-label">Personalidad</p>' + rasgos +
     chips('Valores', p.valores) + chips('Intereses', p.intereses) + chips('Tags', p.tags) +
-    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '') +
+    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '');
+}
+
+function showDetalle(peerPubkey) {
+  const entry = S.perfilCache.get(peerPubkey);
+  if (!entry) return;
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = 'detalle-overlay';
+  ov.innerHTML = '<div class="sheet detalle" role="dialog" aria-label="Detalle del perfil">' +
+    '<button type="button" class="x" data-act="detalle-cerrar" aria-label="Cerrar detalle">✕</button>' +
+    detalleCuerpoHTML(peerPubkey) +
     '<div class="row-btns">' +
     '<button type="button" class="btn warn" data-act="perfil-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
     '<button type="button" class="btn danger" data-act="perfil-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
@@ -1318,6 +1341,32 @@ function showDetalle(peerPubkey) {
 function closeDetalle() {
   const ov = $('#detalle-overlay');
   if (ov) ov.remove();
+}
+
+// Pantalla de perfil del match (v1.8.0): se abre al tocar el
+// avatar/apodo en la cabecera del chat. Muestra TODAS las
+// características del otro (el mismo cuerpo que el detalle de
+// Descubrir) y abajo viven Bloquear y Reportar — salieron de la
+// cabecera, que desbordaba en pantallas estrechas. Volver regresa
+// al chat (las suscripciones del chat no se tocan al navegar aquí).
+function showChatPerfil(peerPubkey) {
+  const entry = S.perfilCache.get(peerPubkey);
+  if (!entry) { showChat(peerPubkey); return; }
+  S.screen = 'chatperfil';
+  $('#app').innerHTML = pantallaShell('matches',
+    '<div class="chatperfil">' +
+    '<div class="chat-head">' +
+    '<button type="button" class="btn ghost sm" data-act="chatperfil-volver" data-peer="' + esc(peerPubkey) + '" aria-label="Volver al chat">←</button>' +
+    '<span class="chat-peer-txt"><b class="chat-nombre">' + esc(entry.profile.apodo || 'Perfil') + '</b>' +
+    '<small class="chat-presencia" id="chatperfil-presencia"></small></span>' +
+    '</div>' +
+    '<div class="detalle-page">' + detalleCuerpoHTML(peerPubkey) + '</div>' +
+    '<div class="row-btns chatperfil-acts">' +
+    '<button type="button" class="btn warn" data-act="perfil-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
+    '<button type="button" class="btn danger" data-act="perfil-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
+    '</div></div>');
+  pintarPresencia();
+  startPresenciaUi();
 }
 
 async function reportarPerfil(peerPubkey) {
@@ -1350,7 +1399,7 @@ function bloquearPerfil(peerPubkey) {
     if (esDesktop()) renderGrid();
     else if (eraActual) { if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1); renderCard(); }
   }
-  else if (S.screen === 'chat') showMatches();
+  else if (S.screen === 'chat' || S.screen === 'chatperfil') showMatches();
 }
 
 // ---------- 5. top 10 ----------
@@ -1429,6 +1478,7 @@ async function loadMatches() {
   const body = $('#matches-body');
   try {
     const d = await ensureData();
+    refreshPresenciaSub(); // ya hay matches conocidos: oírlos
     const mutuos = mutualMatches(d.likes.sent, d.likes.received)
       .filter((pk) => !S.bloqueados.includes(pk) && S.perfilCache.has(pk));
     if (!body) return;
@@ -1460,16 +1510,31 @@ function saveChats() {
   LS.set('chats', S.chats);
 }
 
-// Ids de eventos (DMs/receipts) cuya firma ya se verificó en esta sesión.
-// Un mismo evento llega una vez por relay; se verifica una sola vez.
+// Ids de eventos (DMs/receipts/beacons) cuya firma ya se verificó en
+// esta sesión. Un mismo evento llega una vez por relay; se verifica
+// una sola vez.
 const sigOK = new Set();
+
+// Verificación con caché (C1): la primera vez, firma completa. Si el
+// id ya se verificó, se comprueba que el contenido sigue siendo el
+// firmado (getEventHash === id): un id reutilizado con otro
+// contenido NO hereda la verificación.
+function firmaOK(ev, que) {
+  if (!ev || typeof ev.id !== 'string') return false;
+  if (sigOK.has(ev.id)) {
+    let ok = false;
+    try { ok = getEventHash(ev) === ev.id; } catch {}
+    if (!ok) console.warn('[cubmatch] ' + que + ' con id reutilizado y contenido distinto, descartado:', ev.id);
+    return ok;
+  }
+  if (!eventoValido(ev)) { console.warn('[cubmatch] ' + que + ' con firma inválida, descartado:', ev.id); return false; }
+  sigOK.add(ev.id);
+  return true;
+}
 
 async function dmToMsg(ev) {
   if (!ev || typeof ev.id !== 'string') return null;
-  if (!sigOK.has(ev.id)) {
-    if (!eventoValido(ev)) { console.warn('[cubmatch] DM con firma inválida, descartado:', ev.id); return null; }
-    sigOK.add(ev.id);
-  }
+  if (!firmaOK(ev, 'DM')) return null;
   const peer = ev.pubkey === S.pubkey
     ? (ev.tags.find((t) => t[0] === 'p') || [])[1]
     : ev.pubkey;
@@ -1477,7 +1542,7 @@ async function dmToMsg(ev) {
   let text;
   try { text = await S.pool.messaging().decryptDM(ev); }
   catch { return null; }
-  return {
+  const msg = {
     peer,
     msg: {
       id: ev.id,
@@ -1491,23 +1556,23 @@ async function dmToMsg(ev) {
       read: false,
     },
   };
+  // Si el evento es mío y volvió por la red, su publicación es un
+  // hecho: estado 'enviado' (señal real, ver mensajes.js).
+  if (msg.msg.from === 'me') msg.msg.estado = 'enviado';
+  return msg;
 }
 
 function pushMsg(peer, msg) {
-  S.chats[peer] = S.chats[peer] || [];
-  if (!S.chats[peer].some((m) => m.id === msg.id)) {
-    S.chats[peer].push(msg);
-    S.chats[peer].sort((a, b) => a.ts - b.ts);
-    saveChats();
-  }
+  // Fusión central (mensajes.js): dedup por id, el eco de un mensaje
+  // optimista adopta su id real sin duplicar y se conserva el estado
+  // más avanzado (enviando < enviado; read es OR).
+  S.chats[peer] = fusionarMensajes(S.chats[peer] || [], msg);
+  saveChats();
 }
 
 function handleReceipt(peer, ev) {
   if (!ev || typeof ev.id !== 'string') return false;
-  if (!sigOK.has(ev.id)) {
-    if (!eventoValido(ev)) { console.warn('[cubmatch] receipt con firma inválida, descartado:', ev.id); return false; }
-    sigOK.add(ev.id);
-  }
+  if (!firmaOK(ev, 'receipt')) return false;
   const e = (ev.tags.find((t) => t[0] === 'e') || [])[1];
   if (!e) return false;
   const msgs = S.chats[peer] || [];
@@ -1572,17 +1637,24 @@ function showChat(peerPubkey) {
   S.chatPeer = peerPubkey;
   S.stickerEdit = false;
   S.chats = chatsLS();
+  // 'enviando' de una sesión anterior = envío interrumpido: a 'error'
+  // para que se pueda reintentar (el sync de abajo fusiona el eco si
+  // en realidad sí se había publicado).
+  for (const lista of Object.values(S.chats)) marcarColgados(lista, Date.now());
+  saveChats();
+  refreshPresenciaSub();
   $('#app').innerHTML = pantallaShell('matches',
     '<div class="chat-wrap">' +
     '<div class="chat-head">' +
     '<button type="button" class="btn ghost sm" data-act="nav-matches" aria-label="Volver a matches">←</button>' +
+    '<button type="button" class="chat-peer" data-act="chat-ver-perfil" data-peer="' + esc(peerPubkey) + '" aria-label="Ver el perfil de ' + esc(nombre) + '">' +
     (prof ? avatarImg(peerPubkey, prof, 'avatar xs') : '') +
-    '<b class="chat-nombre">' + esc(nombre) + '</b>' +
+    '<span class="chat-peer-txt"><b class="chat-nombre">' + esc(nombre) + '</b>' +
+    '<small class="chat-presencia" id="chat-presencia"></small></span>' +
+    '</button>' +
     '<span class="chat-acts">' +
     '<button type="button" class="btn ghost sm" data-act="chat-call-voz" aria-label="Llamada de voz" title="Llamada de voz">📞</button>' +
     '<button type="button" class="btn ghost sm" id="chat-video-btn" data-act="chat-call-video" aria-label="Videollamada" title="Videollamada">🎥</button>' +
-    '<button type="button" class="btn ghost sm" data-act="chat-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
-    '<button type="button" class="btn ghost sm" data-act="chat-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
     '</span></div>' +
     '<div class="chat-msgs" id="chat-msgs"></div>' +
     '<div class="sticker-panel" id="sticker-panel" hidden></div>' +
@@ -1593,6 +1665,8 @@ function showChat(peerPubkey) {
     '<button type="submit" class="btn primary">Enviar</button>' +
     '</form></div>');
   renderMsgs();
+  pintarPresencia();
+  startPresenciaUi();
   (async () => {
     try { await syncChatHistory(); } catch {}
     if (S.chatPeer !== peerPubkey) return;
@@ -1652,25 +1726,33 @@ function renderMsgs() {
       return '<div class="msg call-log"><span>' + esc(m.text) +
         ' <small class="muted">' + horaCorta(m.ts) + '</small></span></div>';
     }
-    const tick = m.from === 'me'
-      ? '<span class="tick' + (m.read ? ' read' : '') + '">' + (m.read ? '✓✓' : '✓') + '</span>' : '';
+    // Estados de envío (v1.8.0, mensajes.js): cada tick tiene detrás
+    // una señal real — 🕐 publicando, ✓ ≥1 relay aceptó, ✓✓ en color
+    // = receipt de lectura (kind 24503). Sin señal no hay estado.
+    const ev = estadoVisible(m);
+    const tick = ev === 'visto' ? '<span class="tick read">✓✓</span>'
+      : ev === 'enviado' ? '<span class="tick">✓</span>'
+      : ev === 'enviando' ? '<span class="tick pending" title="Enviando">🕐</span>' : '';
     const meta = '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span>';
+    const retry = ev === 'error'
+      ? '<button type="button" class="msg-retry" data-act="chat-reintentar" data-mid="' + esc(m.id) + '">⚠ No enviado · Toca para reintentar</button>' : '';
+    const wrap = (bubble) => '<div class="msg ' + m.from + (retry ? ' con-error' : '') + '">' + bubble + retry + '</div>';
     // DMs especiales (v1.6.0): payloads JSON de chatx (ubicación/sticker).
     // Si el parseo falla (JSON hostil o cliente viejo), cae a texto plano.
     const p = parseChatPayload(m.text);
     if (p && p.tipo === 'loc') {
-      return '<div class="msg ' + m.from + '"><div class="bubble loc-b">' +
+      return wrap('<div class="bubble loc-b">' +
         '<div class="loc-card"><span class="loc-ico" aria-hidden="true">📍</span>' +
         '<span class="loc-txt"><b>Ubicación compartida</b><br>' +
         '<a href="' + esc(osmUrl(p.lat, p.lon)) + '" target="_blank" rel="noopener">Abrir en el mapa</a></span></div>' +
-        meta + '</div></div>';
+        meta + '</div>');
     }
     if (p && p.tipo === 'sticker') {
-      return '<div class="msg ' + m.from + '"><div class="bubble sticker-b">' +
+      return wrap('<div class="bubble sticker-b">' +
         '<img class="msg-sticker" src="' + esc(p.url) + '" alt="Sticker" loading="lazy">' +
-        meta + '</div></div>';
+        meta + '</div>');
     }
-    return '<div class="msg ' + m.from + '"><div class="bubble">' + esc(m.text) + meta + '</div></div>';
+    return wrap('<div class="bubble">' + esc(m.text) + meta + '</div>');
   }).join('');
   box.scrollTop = box.scrollHeight;
   refreshVideoBtn();
@@ -1688,13 +1770,59 @@ function refreshVideoBtn() {
 }
 
 // Envía un DM al peer del chat abierto (texto plano o payload especial
-// JSON) y lo pinta al momento. Lanza si los relays fallan: cada
-// llamante pone su propio mensaje de error.
+// JSON) con pintado OPTIMISTA: el mensaje aparece al instante en estado
+// 'enviando' (🕐) con un id temporal; al confirmarse la publicación
+// adopta el id real del evento y pasa a 'enviado' (✓); si la
+// publicación falla queda visible en estado 'error' con reintento.
+// La referencia al objeto insertado sigue válida tras la fusión del
+// eco (fusionarMensajes muta in situ), así que las actualizaciones de
+// estado siempre caen sobre el mensaje correcto. Lanza si los relays
+// fallan: cada llamante pone su propio mensaje de error.
+let tmpSeq = 0;
 async function sendChatPayload(texto) {
   const peer = S.chatPeer;
-  const { event } = await sendDMRouted(S.pool, peer, texto);
-  pushMsg(peer, { id: event.id, from: 'me', ts: Date.now(), text: texto, read: false });
+  const msgOpt = {
+    id: 'tmp:' + Date.now().toString(36) + '-' + (++tmpSeq) + '-' + Math.random().toString(36).slice(2, 8),
+    from: 'me', ts: Date.now(), text: texto, read: false, estado: 'enviando',
+  };
+  pushMsg(peer, msgOpt);
   renderMsgs();
+  try {
+    const { event } = await sendDMRouted(S.pool, peer, texto);
+    msgOpt.id = event.id;
+    msgOpt.estado = 'enviado';
+    saveChats();
+    if (S.chatPeer === peer) renderMsgs();
+    return event;
+  } catch (e) {
+    msgOpt.estado = 'error';
+    saveChats();
+    if (S.chatPeer === peer) renderMsgs();
+    throw e;
+  }
+}
+
+// Reintento de un mensaje en estado 'error': republica el mismo texto
+// (evento nuevo; si el intento original en realidad sí había llegado
+// a algún relay pese al error, el otro podría verlo dos veces — es el
+// precio honesto de no tener acuse de los relays).
+async function reintentarMsg(id) {
+  const peer = S.chatPeer;
+  if (!peer) return;
+  const m = (S.chats[peer] || []).find((x) => x.id === id);
+  if (!m || m.from !== 'me' || estadoVisible(m) !== 'error') return;
+  m.estado = 'enviando';
+  saveChats();
+  renderMsgs();
+  try {
+    const { event } = await sendDMRouted(S.pool, peer, m.text);
+    m.id = event.id;
+    m.estado = 'enviado';
+  } catch {
+    m.estado = 'error';
+  }
+  saveChats();
+  if (S.chatPeer === peer) renderMsgs();
 }
 
 async function submitChat() {
@@ -1707,8 +1835,9 @@ async function submitChat() {
   try {
     await sendChatPayload(text);
   } catch {
-    toast('No se pudo enviar. Sin conexión a los relays.');
-    input.value = text;
+    // El mensaje ya quedó pintado con "No enviado · reintentar":
+    // NO se devuelve el texto al input (se duplicaría al reintentar).
+    toast('No se pudo enviar. Quedó en el chat para reintentar.');
   }
 }
 
@@ -1849,6 +1978,108 @@ async function onStickerChange(e) {
   } finally {
     input.value = ''; // permite volver a elegir el mismo archivo
   }
+}
+
+// ---------- presencia en el chat (v1.8.0) ----------
+// Beacon efímero kind 21005 cada ~45 s mientras hay sesión (la
+// lógica pura — TTL, textos, validación — vive en presencia.js).
+// "En línea" = beacon hace <2 min: app abierta recientemente y
+// nada más que eso. La última vez vista se persiste en localStorage
+// (es lo que ESTE teléfono vio, no una verdad de red).
+let presenciaSub = null;
+let presenciaBeaconTimer = null;
+let presenciaAutores = ''; // firma del set de autores suscrito
+
+function publicarBeacon(contenido) {
+  if (!S.pool || !S.sk) return Promise.resolve();
+  return S.pool.messaging()
+    .publish({ kind: KIND_PRESENCIA, tags: [], content: contenido || '' })
+    .catch(() => {});
+}
+
+function startPresencia() {
+  if (!S.pool || !S.sk) return;
+  S.presencia = LS.get('presencia', {}) || {};
+  void publicarBeacon('');
+  if (presenciaBeaconTimer) clearInterval(presenciaBeaconTimer);
+  presenciaBeaconTimer = setInterval(() => { void publicarBeacon(''); }, BEACON_CADA_MS);
+  presenciaBeaconTimer.unref?.(); // no retener el proceso (tests/Node)
+  S.timers.push(presenciaBeaconTimer);
+  refreshPresenciaSub();
+}
+
+function stopPresencia() {
+  if (presenciaBeaconTimer) { clearInterval(presenciaBeaconTimer); presenciaBeaconTimer = null; }
+  if (presenciaSub) { try { presenciaSub.unsub(); } catch {} presenciaSub = null; }
+  presenciaAutores = '';
+}
+
+function matchesPubkeys() {
+  const d = S.data;
+  if (!d || !d.likes) return [];
+  return mutualMatches(d.likes.sent, d.likes.received)
+    .filter((pk) => !S.bloqueados.includes(pk));
+}
+
+// (Re)suscribe a los beacons de mis matches solo si cambió el set.
+function refreshPresenciaSub() {
+  if (!S.pool || !S.sk) return;
+  const autores = matchesPubkeys().sort();
+  const firma = autores.join(',');
+  if (firma === presenciaAutores) return;
+  presenciaAutores = firma;
+  if (presenciaSub) { try { presenciaSub.unsub(); } catch {} presenciaSub = null; }
+  if (!autores.length) return;
+  presenciaSub = S.pool.messaging().subscribe(
+    [{ kinds: [KIND_PRESENCIA], authors: autores }],
+    (ev) => { void handleBeaconEvent(ev); }
+  );
+}
+
+async function handleBeaconEvent(ev) {
+  if (!ev || typeof ev.id !== 'string') return;
+  if (!firmaOK(ev, 'beacon')) return;
+  const b = parseBeacon(ev, Date.now());
+  if (!b || b.pubkey === S.pubkey) return;
+  S.presencia[b.pubkey] = { ts: b.ts, off: b.off };
+  guardarPresencia();
+  pintarPresencia();
+}
+
+function guardarPresencia() {
+  const keys = Object.keys(S.presencia);
+  if (keys.length > 300) { // poda: los 300 vistos más recientemente
+    keys.sort((a, b2) => (S.presencia[b2].ts || 0) - (S.presencia[a].ts || 0));
+    for (const k of keys.slice(300)) delete S.presencia[k];
+  }
+  LS.set('presencia', S.presencia);
+}
+
+// Pinta el estado del peer del chat abierto (cabecera y pantalla de
+// perfil comparten el mismo peer: S.chatPeer no cambia al navegar).
+function pintarPresencia() {
+  const peer = S.chatPeer;
+  if (!peer) return;
+  const info = textoPresencia(S.presencia[peer], Date.now());
+  for (const id of ['chat-presencia', 'chatperfil-presencia']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.textContent = info.texto;
+    el.classList.toggle('on', info.enLinea);
+  }
+}
+
+// Refresco periódico de la línea de presencia (el TTL puede vencer
+// sin que llegue ningún beacon nuevo).
+let presenciaUiTimer = null;
+function startPresenciaUi() {
+  stopPresenciaUi();
+  presenciaUiTimer = setInterval(pintarPresencia, 30000);
+  presenciaUiTimer.unref?.();
+  S.timers.push(presenciaUiTimer);
+}
+function stopPresenciaUi() {
+  if (presenciaUiTimer) { clearInterval(presenciaUiTimer); presenciaUiTimer = null; }
 }
 
 // ---------- 7b. llamadas de voz y video (v1.7.0) ----------
@@ -2228,8 +2459,10 @@ async function toggleOculto(ocultar) {
 
 function cerrarSesion() {
   if (!confirm('¿Cerrar sesión en este teléfono? Tu perfil sigue publicado en la red.')) return;
+  void publicarBeacon('off'); // despedida: acorta el falso "en línea"
   stopChat();
   stopCalls();
+  stopPresencia();
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
   LS.del('sesion');
@@ -2241,11 +2474,13 @@ function restablecerRelays() {
   S.relayStatus = {};
   if (S.pool && S.sk) {
     stopCalls();
+    stopPresencia();
     try { S.pool.shutdown(); } catch {}
     S.pool = makePool(S.sk);
     screenScope = null;
     setScreenScope('both');
     startCalls();
+    startPresencia();
   }
   toast('Relays restablecidos. Reconectando…');
   showAjustes();
@@ -2253,8 +2488,10 @@ function restablecerRelays() {
 
 function borrarDatos() {
   if (!confirm('¿Borrar TODOS los datos locales de CubMatch en este teléfono? (incluye tu sesión)')) return;
+  void publicarBeacon('off');
   stopChat();
   stopCalls();
+  stopPresencia();
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
   const keys = [];
@@ -2432,8 +2669,9 @@ const ACTIONS = {
     if (ov) ov.remove();
     nextCard();
   },
-  'chat-reportar': (el) => reportarPerfil(el.dataset.peer),
-  'chat-bloquear': (el) => bloquearPerfil(el.dataset.peer),
+  'chat-ver-perfil': (el) => showChatPerfil(el.dataset.peer),
+  'chatperfil-volver': (el) => showChat(el.dataset.peer),
+  'chat-reintentar': (el) => reintentarMsg(el.dataset.mid),
   'chat-call-voz': () => iniciarLlamada('audio'),
   'chat-call-video': () => {
     const peer = S.chatPeer;
@@ -2476,7 +2714,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

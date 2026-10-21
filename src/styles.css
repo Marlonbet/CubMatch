@@ -486,8 +486,28 @@ textarea { resize: vertical; }
   height: calc(100vh - var(--nav-total)); height: calc(100dvh - var(--nav-total));
 }
 .chat-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: var(--superficie); border-bottom: 1px solid var(--borde); }
+.chat-head > .btn { flex-shrink: 0; }
 .chat-nombre { flex: 1; font-size: 17px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-acts { display: flex; gap: 6px; }
+.chat-acts { display: flex; gap: 6px; flex-shrink: 0; }
+/* bloque tocable avatar+apodo+presencia (v1.8.0): dos líneas, sin
+   desborde horizontal ni a 360px — el texto se recorta con … y los
+   botones de llamada nunca se encogen */
+.chat-peer {
+  display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
+  background: none; border: none; padding: 0; margin: 0; cursor: pointer;
+  text-align: left; font: inherit; color: inherit;
+}
+.chat-peer .avatar { flex-shrink: 0; }
+.chat-peer-txt { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.25; }
+.chat-peer-txt .chat-nombre { flex: none; }
+.chat-presencia { font-size: 12px; font-weight: 400; color: var(--tierra-claro); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-presencia.on { color: var(--verde-txt); font-weight: 600; }
+.chat-presencia:empty { display: none; }
+/* pantalla de perfil del match (v1.8.0) */
+.detalle-page { text-align: center; padding: 20px 16px 4px; }
+.detalle-page .avatar.big { margin: 8px auto; display: block; border: 4px solid var(--superficie); box-shadow: var(--sombra); }
+.detalle-page h3 { margin: 6px 0 2px; font-size: 24px; font-weight: 800; }
+.chatperfil-acts { padding: 0 16px 28px; }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 16px 12px; display: flex; flex-direction: column; gap: 6px; }
 .msg { display: flex; }
 .msg.me { justify-content: flex-end; }
@@ -500,6 +520,14 @@ textarea { resize: vertical; }
 .msg.peer .bubble { background: var(--superficie); color: var(--texto); border: 1px solid var(--borde); border-bottom-left-radius: 6px; }
 .mmeta { display: block; text-align: right; font-size: 11px; opacity: 0.75; margin-top: 4px; font-variant-numeric: tabular-nums; }
 .tick.read { color: #bfe6ff; font-weight: 700; }
+.tick.pending { opacity: 0.75; }
+/* mensaje propio sin enviar (v1.8.0): burbuja + línea de reintento */
+.msg.con-error { flex-direction: column; }
+.msg.me.con-error { align-items: flex-end; }
+.msg-retry {
+  background: none; border: none; cursor: pointer; padding: 4px 8px;
+  color: var(--rojo-txt); font-size: 12.5px; font-weight: 600; text-align: right;
+}
 .chat-form {
   display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
   background: var(--superficie); border-top: 1px solid var(--borde);
