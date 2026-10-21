@@ -18,6 +18,20 @@
 // también falla, la llamada no conecta y la UI lo dice con
 // honestidad.
 //
+// Blindaje de estados (v1.8.3, anti-ocupado fantasma): ningún estado
+// sin conexión viva puede vivir eternamente. Causas cazadas en la
+// v1.8.1: `conectando` no tenía NINGÚN temporizador (al responder
+// se desarmaba el de timbre y el ICE móvil puede quedarse en
+// checking/disconnected sin llegar jamás a failed) y un end/reject
+// que adelantaba a su offer se descartaba, dejando sonar llamadas
+// ya muertas. Ahora: timbre entrante alineado (45 s), timeout de
+// conexión, watchdog de ICE desconectado, memoria de señales
+// terminales de ids desconocidos, un ÚNICO camino de reset y
+// defensas para liberar un estado pegado al llamar o al recibir.
+// Y si el primer intento de conexión muere en `conectando`, hay
+// UNA segunda oportunidad: renegociación con restart de ICE
+// (mismo callId, offer marcada restart:true) antes de rendirse.
+//
 // Reglas de producto (del dueño):
 // - Voz: disponible desde el primer momento tras el match.
 // - Video, triple consentimiento:
@@ -37,7 +51,19 @@ export const KIND_CALL = 21004; // efímero: señalización de llamada
 export const CALL_V = 1;
 export const MIN_MSGS_VIDEO = 10;
 export const RING_TIMEOUT_MS = 45000;       // timbre saliente: 45 s
-export const RING_IN_TIMEOUT_MS = 60000;    // timbre entrante: 60 s
+// Timbre entrante: 45 s, ALINEADO con el saliente (antes 60 s: el
+// llamante ya había abandonado y el receptor seguía "ocupado" con
+// una llamada muerta — falso ocupado en cada reintento rápido).
+export const RING_IN_TIMEOUT_MS = 45000;
+// `conectando` tampoco es eterno: si tras responder/aceptar el medio
+// no llega a conectar en este plazo, la llamada se da por imposible.
+export const CONNECT_TIMEOUT_MS = 45000;
+// Watchdog de ICE: en redes móviles `disconnected` puede no pasar
+// nunca a `failed`; si dura más que esta gracia seguida, se corta.
+export const ICE_DISCONNECTED_GRACE_MS = 10000;
+// Un estado no-idle sin pc viva, o más viejo que esto, está pegado:
+// no puede bloquear ni la llamada propia ni una offer nueva.
+export const ESTADO_PEGADO_MS = 60000;
 
 // Puerta de frescura de las offers: la señalización caduca enseguida
 // (el timbre saliente dura 45 s). Una offer con created_at más viejo
@@ -63,9 +89,12 @@ export const STUN_URLS = [
 
 // TURN público comunitario (proyecto OpenRelay de Metered, con
 // credenciales públicas): el respaldo para datos móviles tras CGNAT.
+// Varias puertas del MISMO servidor: UDP y TCP por el 80, TCP por el
+// 443 (para redes que bloquean todo puerto que no sea el web) y TLS.
 export const TURN_URLS = [
   'turn:openrelay.metered.ca:80',
   'turn:openrelay.metered.ca:80?transport=tcp',
+  'turn:openrelay.metered.ca:443?transport=tcp',
   'turns:openrelay.metered.ca:443',
 ];
 export const TURN_USER = 'openrelayproject';
@@ -108,12 +137,15 @@ const candOk = (c) =>
   (!!c && typeof c === 'object' && typeof c.candidate === 'string' && c.candidate.length <= 4096);
 
 // Construye el payload de señalización (objeto listo para JSON).
-// Solo incluye los campos opcionales cuando son válidos.
-export function buildCallPayload({ id, op, media, sdp, candidate, motivo } = {}) {
+// Solo incluye los campos opcionales cuando son válidos. `restart`
+// marca una offer de renegociación con reinicio de ICE dentro de la
+// MISMA llamada (mismo id): no es una llamada nueva.
+export function buildCallPayload({ id, op, media, sdp, candidate, motivo, restart } = {}) {
   const p = { t: 'call', v: CALL_V, id, op, media };
   if (sdpOk(sdp)) p.sdp = sdp;
   if (candOk(candidate)) p.candidate = candidate;
   if (CALL_MOTIVOS.includes(motivo)) p.motivo = motivo;
+  if (op === 'offer' && restart === true) p.restart = true;
   return p;
 }
 
@@ -134,6 +166,7 @@ export function parseCallPayload(text) {
     if (!sdpOk(o.sdp)) return null;
     p.sdp = o.sdp;
   }
+  if (o.op === 'offer' && o.restart === true) p.restart = true;
   if (o.op === 'ice') {
     if (!candOk(o.candidate)) return null;
     p.candidate = o.candidate;
@@ -249,8 +282,11 @@ export class CallSession {
     this.remoteStream = null;
     this.muted = false;
     this._connectedAt = 0;
-    this._ringTimer = null;
+    this._ringTimer = null;      // timbre (saliendo o entrante)
+    this._connectTimer = null;   // plazo para que `conectando` conecte
+    this._iceWatchdog = null;    // gracia de ICE `disconnected`
     this._iceQueue = [];
+    this._stateSince = this._now(); // nacimiento del estado actual
     // Defensa ante reentregas de los relays (el mismo evento llega
     // por varios, o un relay lo guardó y lo suelta al reconectar):
     // ids de llamadas ya cerradas (no resucitan) y buffer de ICE
@@ -265,6 +301,13 @@ export class CallSession {
 
   _emit(e) { try { this._onEvent(e); } catch {} }
 
+  // Única vía para cambiar de estado: deja constancia de cuándo
+  // nació el estado (la antigüedad decide si está pegado).
+  _setState(s) {
+    this.state = s;
+    this._stateSince = this._now();
+  }
+
   _sendSafe(peer, payload) {
     try {
       const r = this._send(peer, payload);
@@ -272,21 +315,29 @@ export class CallSession {
     } catch {}
   }
 
-  _armRingTimer(ms, fn) {
-    this._disarmRingTimer();
-    this._ringTimer = this._setT(() => { this._ringTimer = null; fn(); }, ms);
+  _armTimer(key, ms, fn) {
+    this._disarmTimer(key);
+    this[key] = this._setT(() => { this[key] = null; fn(); }, ms);
   }
 
-  _disarmRingTimer() {
-    if (this._ringTimer != null) { try { this._clearT(this._ringTimer); } catch {} this._ringTimer = null; }
+  _disarmTimer(key) {
+    if (this[key] != null) { try { this._clearT(this[key]); } catch {} this[key] = null; }
+  }
+
+  _armRingTimer(ms, fn) { this._armTimer('_ringTimer', ms, fn); }
+  _disarmRingTimer() { this._disarmTimer('_ringTimer'); }
+  _disarmConnectTimer() { this._disarmTimer('_connectTimer'); }
+  _disarmIceWatchdog() { this._disarmTimer('_iceWatchdog'); }
+
+  _disarmAllTimers() {
+    this._disarmRingTimer();
+    this._disarmConnectTimer();
+    this._disarmIceWatchdog();
   }
 
   // Cierre local SIN avisar ni emitir (logout, cambio de cuenta).
   abortar() {
-    if (this.current) this._recordarId(this.current.id);
-    this._teardown();
-    this.state = 'idle';
-    this.current = null;
+    this._reset();
   }
 
   // Anota un callId como cerrado: si su offer se reentrega, no suena.
@@ -334,8 +385,17 @@ export class CallSession {
     if (b.candidates.length < ICE_BUFFER_MAX_POR_ID) b.candidates.push(payload.candidate);
   }
 
-  _teardown() {
-    this._disarmRingTimer();
+  // ---------------------------------------------------------- reset único
+  // EL camino de vuelta a idle. TODAS las salidas pasan por aquí
+  // (colgar, rechazo, timeouts, errores, ICE muerto, aborto):
+  // anota el callId como cerrado, cancela TODOS los temporizadores,
+  // cierra el pc, detiene los tracks y limpia el estado. Si una
+  // salida futura olvida este método, el blindaje se rompe: no
+  // resetees a mano en ningún otro sitio.
+  _reset() {
+    const cur = this.current;
+    if (cur) this._recordarId(cur.id);
+    this._disarmAllTimers();
     this._iceQueue = [];
     this._connectedAt = 0;
     this.muted = false;
@@ -345,25 +405,182 @@ export class CallSession {
     }
     this.remoteStream = null;
     if (this.pc) {
-      try { this.pc.onicecandidate = null; this.pc.ontrack = null; this.pc.onconnectionstatechange = null; } catch {}
+      try {
+        this.pc.onicecandidate = null; this.pc.ontrack = null;
+        this.pc.onconnectionstatechange = null; this.pc.oniceconnectionstatechange = null;
+      } catch {}
       try { this.pc.close(); } catch {}
       this.pc = null;
     }
+    this._setState('idle');
+    this.current = null;
+    return cur;
   }
 
   // Termina la llamada actual emitiendo 'terminada'.
   _terminar(resultado, mensaje) {
+    if (!this.current) { this._reset(); return; }
     const cur = this.current;
-    const durSeg = this.duracionSeg();
-    if (cur) this._recordarId(cur.id);
-    this._teardown();
-    this.state = 'idle';
-    this.current = null;
-    if (cur) {
-      this._emit({
-        tipo: 'terminada', peer: cur.peer, media: cur.media, id: cur.id,
-        durSeg, resultado, ...(mensaje ? { mensaje } : {}),
-      });
+    const durSeg = this.duracionSeg(); // antes del reset: limpia _connectedAt
+    this._reset();
+    this._emit({
+      tipo: 'terminada', peer: cur.peer, media: cur.media, id: cur.id,
+      durSeg, resultado, ...(mensaje ? { mensaje } : {}),
+    });
+  }
+
+  // ------------------------------------------------- estados pegados
+
+  // ¿Hay una conexión WebRTC con vida? Sin pc (timbre entrante,
+  // permiso pendiente) o con el pc cerrado/fallido, NO.
+  _pcViva() {
+    if (!this.pc) return false;
+    const st = this.pc.connectionState;
+    return st !== 'closed' && st !== 'failed';
+  }
+
+  // ¿Puedo forzar una llamada saliente sobre el estado actual? La
+  // regla: sin pc viva, o estado más viejo que ESTADO_PEGADO_MS.
+  // Matiz deliberado: una `conectada` con pc viva es una llamada
+  // REAL en curso y nunca se sacrifica, lleve lo que lleve.
+  _puedoForzarSalida() {
+    if (this.state === 'idle') return true;
+    if (this.state === 'conectada' && this._pcViva()) return false;
+    return !this._pcViva() || (this._now() - this._stateSince > ESTADO_PEGADO_MS);
+  }
+
+  // ¿La "llamada" que ocupa la sesión está muerta para una offer
+  // nueva? Un timbre entrante que ya superó su propio plazo (su
+  // timer pudo no correr: en móvil los timers de una pestaña en
+  // segundo plano se estrangulan) o un estado sin pc viva igual de
+  // viejo. Con pc viva y fresco, es un ocupado REAL.
+  _ocupacionMuerta() {
+    if (this.state === 'idle') return true;
+    const edad = this._now() - this._stateSince;
+    if (this.state === 'entrante') return edad >= RING_IN_TIMEOUT_MS;
+    return !this._pcViva() && edad >= RING_IN_TIMEOUT_MS;
+  }
+
+  // Suelta el estado actual avisando al par por el camino que
+  // corresponda, y termina por el reset único. Compartido por el
+  // forzado saliente y por el anti-falso-ocupado entrante.
+  _liberarPegada() {
+    const cur = this.current;
+    if (!cur) { this._reset(); return; }
+    if (this.state === 'entrante') {
+      // Estaba sonando (o su fantasma): el llamante recibe el
+      // ocupado que le corresponde y queda como perdida local.
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'reject', media: cur.media, motivo: 'ocupado' }));
+      this._terminar('perdida');
+    } else if (this.state === 'conectada' || this._connectedAt) {
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+      this._terminar('completada');
+    } else if (cur.dir === 'saliente') {
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+      this._terminar('sin-respuesta');
+    } else {
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+      this._terminar('sin-conexion');
+    }
+  }
+
+  // ------------------------------------------------- watchdogs
+
+  // `conectando` con plazo: si el medio no conecta a tiempo, fuera.
+  _armConnectTimer(cur) {
+    this._armTimer('_connectTimer', CONNECT_TIMEOUT_MS, () => {
+      if (this.current === cur && this.state === 'conectando') {
+        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+        this._terminar('sin-conexion');
+      }
+    });
+  }
+
+  // ICE `disconnected` sostenido: en datos móviles puede quedarse
+  // ahí para siempre sin llegar a `failed`; tras la gracia se corta
+  // como sin-conexion. Se arma una sola vez por episodio (la gracia
+  // corre desde el PRIMER disconnected, no se renueva).
+  _armIceWatchdog(cur) {
+    if (this._iceWatchdog != null) return;
+    this._armTimer('_iceWatchdog', ICE_DISCONNECTED_GRACE_MS, () => {
+      if (this.current !== cur || !this.pc) return;
+      const sigueCortado = this.pc.iceConnectionState === 'disconnected'
+        || this.pc.connectionState === 'disconnected';
+      if (!sigueCortado) return; // se recuperó sin avisar: nada que cortar
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+      this._terminar('sin-conexion');
+    });
+  }
+
+  // ------------------------------------------------- restart de ICE
+
+  // ICE llegó a `failed`. En `conectando` hay UNA segunda
+  // oportunidad: renegociar con restart de ICE (credenciales nuevas,
+  // candidatos nuevos — a menudo el primer intento muere por una
+  // ruta que el segundo, vía TURN, sí encuentra). Si el segundo
+  // intento también falla, o si ya estábamos `conectada`, manda el
+  // corte de siempre. Los dos handlers (connectionState e
+  // iceConnectionState) pueden avisar del MISMO fallo: el restart
+  // en curso actúa de cerrojo para no contarlo dos veces.
+  _onIceFailed(cur) {
+    if (!this.current || this.current.id !== cur.id) return;
+    if (cur.restartEnCurso) return; // este fallo ya se está atendiendo
+    if (this.state === 'conectando' && !cur.restartUsado) {
+      cur.restartUsado = true;
+      void this._reiniciarIce(cur);
+      return;
+    }
+    // Ni directo ni con el TURN de respaldo (o segundo fallo, o la
+    // llamada ya estaba conectada): las redes no dejaron pasar.
+    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+    this._terminar('sin-conexion');
+  }
+
+  // Lado que detecta el fallo: se convierte en oferente de la
+  // renegociación (sea cual sea su rol original) y manda una offer
+  // NUEVA con el MISMO callId y restart:true. La respuesta llega
+  // por el camino normal de `answer`.
+  async _reiniciarIce(cur) {
+    cur.restartEnCurso = true;
+    try {
+      if (!this.pc || this.current !== cur) return;
+      const offer = await this.pc.createOffer({ iceRestart: true });
+      if (this.current !== cur || !this.pc) return;
+      await this.pc.setLocalDescription(offer);
+      if (this.current !== cur) return;
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'offer', media: cur.media, sdp: offer.sdp, restart: true }));
+    } catch {
+      if (this.current === cur) {
+        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+        this._terminar('sin-conexion');
+      }
+    } finally {
+      cur.restartEnCurso = false;
+    }
+  }
+
+  // Lado que recibe la offer de restart de la llamada en curso: la
+  // responde como answerer de esta ronda. NO es una llamada nueva:
+  // no suena, no pasa por los candados; es la misma conversación.
+  async _responderRestart(cur, payload) {
+    cur.restartEnCurso = true;
+    try {
+      if (!this.pc || this.current !== cur) return;
+      await this.pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
+      if (this.current !== cur || !this.pc) return;
+      await this._flushIce();
+      const answer = await this.pc.createAnswer();
+      if (this.current !== cur || !this.pc) return;
+      await this.pc.setLocalDescription(answer);
+      if (this.current !== cur) return;
+      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'answer', media: cur.media, sdp: answer.sdp }));
+    } catch {
+      if (this.current === cur) {
+        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+        this._terminar('sin-conexion');
+      }
+    } finally {
+      cur.restartEnCurso = false;
     }
   }
 
@@ -385,16 +602,29 @@ export class CallSession {
       const st = pc.connectionState;
       if (st === 'connected') {
         if (this.state !== 'conectada') {
-          this.state = 'conectada';
+          this._setState('conectada');
           this._connectedAt = this._now();
           this._disarmRingTimer();
+          this._disarmConnectTimer();
+          this._disarmIceWatchdog();
           this._emit({ tipo: 'conectada', peer: cur.peer, media: cur.media, id: cur.id });
         }
       } else if (st === 'failed') {
-        // Ni directo ni con el TURN de respaldo: las redes no
-        // dejaron pasar el medio.
-        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-        this._terminar('sin-conexion');
+        this._onIceFailed(cur);
+      } else if (st === 'disconnected') {
+        this._armIceWatchdog(cur);
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (!this.current || this.current.id !== cur.id) return;
+      const st = pc.iceConnectionState;
+      if (st === 'disconnected') {
+        this._armIceWatchdog(cur);
+      } else if (st === 'connected' || st === 'completed') {
+        this._disarmIceWatchdog();
+      } else if (st === 'failed') {
+        // Hay navegadores que solo mueven el estado ICE.
+        this._onIceFailed(cur);
       }
     };
   }
@@ -418,16 +648,24 @@ export class CallSession {
 
   // ---- lado que llama ----
   async llamar(peer, media) {
-    if (this.state !== 'idle' || !peer || !CALL_MEDIAS.includes(media)) return false;
+    if (!peer || !CALL_MEDIAS.includes(media)) return false;
+    if (this.state !== 'idle') {
+      // Un fantasma no bloquea al propio usuario: si el estado está
+      // pegado (sin pc viva o demasiado viejo), se libera por el
+      // camino único y la llamada procede. Con una llamada viva de
+      // verdad, no se toca nada.
+      if (!this._puedoForzarSalida()) return false;
+      this._liberarPegada();
+    }
     const cur = { id: newCallId(this._rng), peer, media, dir: 'saliente' };
     this.current = cur;
-    this.state = 'saliendo';
+    this._setState('saliendo');
     let stream;
     try {
       stream = await this._getLocalStream(media);
     } catch {
       if (this.current !== cur) return false; // abortada mientras pedía el medio
-      this.current = null; this.state = 'idle';
+      this._reset();
       this._emit({
         tipo: 'terminada', peer, media, id: cur.id, durSeg: 0, resultado: 'error',
         mensaje: media === 'video'
@@ -445,7 +683,7 @@ export class CallSession {
     let pc;
     try { pc = this._createPC(); } catch { pc = null; }
     if (!pc) {
-      this._teardown(); this.current = null; this.state = 'idle';
+      this._reset();
       this._emit({
         tipo: 'terminada', peer, media, id: cur.id, durSeg: 0, resultado: 'error',
         mensaje: 'Este navegador no soporta llamadas (WebRTC no disponible).',
@@ -484,16 +722,33 @@ export class CallSession {
       // varios relays, o resucitar de un almacén al reconectar. Una
       // copia de la llamada en curso NO es "segunda llamada" (nada
       // de reject ocupado) y una ya cerrada no vuelve a sonar.
-      if (this.current && payload.id === this.current.id) return;
+      if (this.current && payload.id === this.current.id) {
+        // Excepción: una offer con restart:true del mismo id y del
+        // mismo par, estando `conectando`, es la renegociación con
+        // restart de ICE de ESTA llamada — se responde, no suena.
+        if (payload.restart === true && peer === this.current.peer && this.state === 'conectando') {
+          await this._responderRestart(this.current, payload);
+        }
+        return;
+      }
       if (this._idCerrado(payload.id)) return;
       if (this.state !== 'idle') {
-        // Segunda llamada estando en una: ocupado, sin sonar.
-        this._sendSafe(peer, buildCallPayload({ id: payload.id, op: 'reject', media: payload.media, motivo: 'ocupado' }));
-        return;
+        // Anti-falso-ocupado: antes de rechazar, mirar si la
+        // "llamada" que ocupa la sesión está muerta (timbre ya
+        // caducado con el timer estrangulado en segundo plano, o
+        // estado sin pc viva igual de viejo). Si lo está, se libera
+        // y la offer nueva se atiende como corresponde; si la
+        // llamada actual es real, ocupado y punto.
+        if (!this._ocupacionMuerta()) {
+          this._sendSafe(peer, buildCallPayload({ id: payload.id, op: 'reject', media: payload.media, motivo: 'ocupado' }));
+          return;
+        }
+        this._liberarPegada();
+        if (this.state !== 'idle') return; // no se pudo liberar: no suena
       }
       const cur = { id: payload.id, peer, media: payload.media, dir: 'entrante', sdp: payload.sdp };
       this.current = cur;
-      this.state = 'entrante';
+      this._setState('entrante');
       // ICE que llegó ANTES que esta offer: a la cola de la sesión,
       // se aplica tras setRemoteDescription al aceptar.
       const huerfano = this._iceHuerfano.get(payload.id);
@@ -510,6 +765,11 @@ export class CallSession {
 
     const cur = this.current;
     if (!cur || payload.id !== cur.id || peer !== cur.peer) {
+      // Señales terminales de un callId AÚN desconocido: llegaron
+      // ANTES que su offer (los relays no garantizan orden). Se
+      // memorizan como cerradas — si la offer aparece después,
+      // nace muerta y no suena (ver el chequeo _idCerrado arriba).
+      if (op === 'end' || op === 'reject') { this._recordarId(payload.id); return; }
       // ICE sin sesión todavía (llegó antes que la offer o durante
       // un hueco entre relays): se buferiza por callId con TTL y se
       // aplica cuando la offer cree la sesión. El resto de ops sin
@@ -521,7 +781,8 @@ export class CallSession {
     if (op === 'answer') {
       if (this.state !== 'saliendo' && this.state !== 'conectando') return;
       this._disarmRingTimer(); // ya respondió: el timbre no aplica
-      this.state = 'conectando';
+      this._setState('conectando');
+      this._armConnectTimer(cur); // …pero conectar sí tiene plazo
       try {
         await this.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
         await this._flushIce();
@@ -535,7 +796,9 @@ export class CallSession {
     }
 
     if (op === 'reject') {
-      if (this.state === 'saliendo') {
+      // Un reject del par cierra mi llamada saliente en cualquier
+      // estado previo a conectar (saliendo o ya conectando).
+      if (cur.dir === 'saliente' && (this.state === 'saliendo' || this.state === 'conectando')) {
         this._terminar(payload.motivo === 'ocupado' ? 'ocupado' : 'rechazada');
       }
       return;
@@ -582,7 +845,8 @@ export class CallSession {
     }
     this.pc = pc;
     this._wirePC(pc, cur);
-    this.state = 'conectando';
+    this._setState('conectando');
+    this._armConnectTimer(cur); // aceptar no es conectar: hay plazo
     try {
       for (const track of stream.getTracks()) pc.addTrack(track, stream);
       await pc.setRemoteDescription({ type: 'offer', sdp: cur.sdp });

@@ -14,6 +14,7 @@ import {
   KIND_CALL, buildCallPayload, parseCallPayload, newCallId,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
   iceServersConfig, offerEsFresca, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
+  RING_IN_TIMEOUT_MS, CONNECT_TIMEOUT_MS, ICE_DISCONNECTED_GRACE_MS,
 } from '../src/llamadas.js';
 
 // ------------------------------------------------------------ payloads
@@ -68,11 +69,13 @@ test('iceServersConfig: STUN para directo + TURN OpenRelay de respaldo (datos m�
     'stun:stunserver.stunprotocol.org:3478',
     'stun:stun.l.google.com:19302',
   ]);
-  // TURN público de OpenRelay (Metered): UDP y TCP en el 80 y
+  // TURN público de OpenRelay (Metered): UDP y TCP en el 80, TCP en
+  // el 443 (puerta para redes que solo dejan pasar el puerto web) y
   // TLS en el 443, con sus credenciales públicas.
   assert.deepEqual(cfg[1].urls, [
     'turn:openrelay.metered.ca:80',
     'turn:openrelay.metered.ca:80?transport=tcp',
+    'turn:openrelay.metered.ca:443?transport=tcp',
     'turns:openrelay.metered.ca:443',
   ]);
   assert.equal(cfg[1].username, 'openrelayproject');
@@ -142,20 +145,23 @@ class FakeStream {
 class FakePC {
   constructor() {
     this.connectionState = 'new';
+    this.iceConnectionState = 'new';
     this.remoteDescription = null;
     this.localDescription = null;
     this.added = [];
     this.closed = false;
     this.onicecandidate = null; this.ontrack = null; this.onconnectionstatechange = null;
+    this.oniceconnectionstatechange = null;
   }
   addTrack(track, stream) { this.added.push(track.kind); }
-  async createOffer() { return { type: 'offer', sdp: 'SDP-OFFER' }; }
+  async createOffer(opts) { this.offerOpts = this.offerOpts || []; this.offerOpts.push(opts); return { type: 'offer', sdp: 'SDP-OFFER' }; }
   async createAnswer() { return { type: 'answer', sdp: 'SDP-ANSWER' }; }
   async setLocalDescription(d) { this.localDescription = d; }
   async setRemoteDescription(d) { this.remoteDescription = d; }
   async addIceCandidate(c) { this.candidates = this.candidates || []; this.candidates.push(c); }
   close() { this.closed = true; }
   setConnState(st) { this.connectionState = st; if (this.onconnectionstatechange) this.onconnectionstatechange(); }
+  setIceState(st) { this.iceConnectionState = st; if (this.oniceconnectionstatechange) this.oniceconnectionstatechange(); }
   emitIce(cand) { if (this.onicecandidate) this.onicecandidate({ candidate: cand }); }
   emitTrack() { if (this.ontrack) this.ontrack({ streams: [{ remoto: true }] }); }
 }
@@ -418,6 +424,254 @@ test('sesión: buffer de ICE huérfano caduca (TTL) y no contamina llamadas post
   await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idViejo, op: 'offer', media: 'audio', sdp: 'SDP' })));
   assert.equal(await ses.aceptar(), true);
   assert.deepEqual(ses.pc.candidates, [{ candidate: 'candidate:nuevo' }], 'solo entró el candidato vivo, no el caducado');
+});
+
+// --------------------------------------- fix v1.8.3: anti-ocupado fantasma
+
+test('sesión: el timbre entrante caduca a los 45 s (alineado) y la siguiente llamada SÍ suena', async () => {
+  const { ses, eventos, timers } = mkSession();
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'entrante');
+  assert.equal(timers.count(), 1);
+  timers.fire(RING_IN_TIMEOUT_MS); // antes eran 60 s: quedaba "ocupado" tras abandonarse
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'perdida');
+  assert.equal(timers.count(), 0, 'el reset no deja timers huérfanos');
+  // La re-llamada inmediata ya NO recibe un ocupado fantasma:
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-ccccccccdddddddd', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'entrante', 'la segunda llamada suena');
+});
+
+test('sesión: un end/reject que adelanta a su offer mata la offer tardía (nace muerta)', async () => {
+  const { ses, eventos } = mkSession();
+  const idX = 'call-12121212abababab';
+  // Los relays no ordenan: primero llega el end de una llamada que
+  // aquí aún no "existe". Antes se descartaba y la offer sonaba.
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'end', media: 'audio' })));
+  assert.equal(ses.state, 'idle');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'idle', 'la offer tardía no suena');
+  assert.equal(eventos.filter((e) => e.tipo === 'entrante').length, 0);
+  // Igual con un reject temprano:
+  const idY = 'call-34343434cdcdcdcd';
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idY, op: 'reject', media: 'audio', motivo: 'ocupado' })));
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idY, op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'idle');
+  // Y una llamada distinta no se contamina:
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-56565656efefefef', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'entrante', 'otra llamada sí suena');
+});
+
+test('sesión: conectando tiene plazo — si el medio nunca llega, se corta solo', async () => {
+  const { ses, sent, eventos, timers } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  assert.equal(ses.state, 'conectando');
+  assert.equal(timers.count(), 1, 'solo queda el plazo de conexión');
+  timers.fire(CONNECT_TIMEOUT_MS);
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
+  assert.ok(sent.some((s) => s.payload.op === 'end'));
+  assert.equal(timers.count(), 0);
+});
+
+test('sesión: watchdog de ICE — disconnected breve se perdona, sostenido corta', async () => {
+  const { ses, sent, eventos, timers } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setConnState('connected');
+  assert.equal(ses.state, 'conectada');
+  assert.equal(timers.count(), 0, 'conectada no deja timers vivos');
+  // Un bache de red: disconnected… y se recupera antes de la gracia.
+  ses.pc.setIceState('disconnected');
+  assert.equal(timers.count(), 1, 'watchdog armado');
+  ses.pc.setIceState('connected');
+  assert.equal(timers.count(), 0, 'watchdog desarmado al recuperarse');
+  assert.equal(ses.state, 'conectada');
+  // Segundo bache, este sostenido: a la gracia, corte limpio.
+  ses.pc.setIceState('disconnected');
+  timers.fire(ICE_DISCONNECTED_GRACE_MS);
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
+  assert.ok(sent.some((s) => s.payload.op === 'end'));
+  assert.equal(timers.count(), 0);
+});
+
+test('sesión: watchdog de ICE también vigila el conectando del receptor', async () => {
+  const { ses, eventos, timers } = mkSession();
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(await ses.aceptar(), true);
+  assert.equal(ses.state, 'conectando');
+  ses.pc.setIceState('disconnected');
+  timers.fire(ICE_DISCONNECTED_GRACE_MS);
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
+  assert.equal(timers.count(), 0, 'también cayó el plazo de conexión: reset total');
+});
+
+test('sesión: llamar desde un estado pegado libera el fantasma y procede; desde una viva, no', async () => {
+  // Caso 1: acepté y la conexión murió en silencio (pc cerrada, sin eventos).
+  const a = mkSession();
+  await a.ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(await a.ses.aceptar(), true);
+  a.ses.pc.connectionState = 'closed'; // el pc murió sin avisar
+  assert.equal(await a.ses.llamar('otroPK', 'audio'), true, 'un fantasma no bloquea mi propia llamada');
+  assert.equal(a.ses.state, 'saliendo');
+  assert.ok(a.sent.some((s) => s.payload.op === 'end' && s.payload.id === 'call-aaaaaaaabbbbbbbb'), 'al fantasma se le avisó el cierre');
+  assert.ok(a.eventos.some((e) => e.tipo === 'terminada' && e.id === 'call-aaaaaaaabbbbbbbb'));
+  assert.ok(a.sent.some((s) => s.payload.op === 'offer' && s.peer === 'otroPK'), 'salió la offer nueva');
+
+  // Caso 2: conectando con pc "viva" pero estado viejísimo (>60 s).
+  const b = mkSession();
+  await b.ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(await b.ses.aceptar(), true);
+  b.avanzar(61000);
+  assert.equal(await b.ses.llamar('otroPK', 'audio'), true);
+  assert.equal(b.ses.state, 'saliendo');
+
+  // Caso 3 (negativo): llamada CONECTADA y viva — llamar no la toca.
+  const c = mkSession();
+  await c.ses.llamar('peerPK', 'audio');
+  await c.ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  c.ses.pc.setConnState('connected');
+  assert.equal(c.ses.state, 'conectada');
+  assert.equal(await c.ses.llamar('otroPK', 'audio'), false, 'una llamada viva no se sacrifica');
+  assert.equal(c.ses.state, 'conectada');
+});
+
+test('sesión: offer nueva frente a timbre caducado (timer dormido) — suena, no sale ocupado', async () => {
+  const { ses, sent, eventos, avanzar, timers } = mkSession();
+  const id1 = 'call-aaaaaaaabbbbbbbb', id2 = 'call-ccccccccdddddddd';
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: id1, op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'entrante');
+  avanzar(46000); // el reloj pasó el plazo, pero el TIMER no corrió (app en segundo plano)
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: id2, op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(ses.state, 'entrante', 'la offer nueva suena');
+  assert.equal(ses.current.id, id2);
+  assert.equal(eventos.filter((e) => e.tipo === 'entrante').length, 2, 'sonaron la vieja y la nueva');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada' && e.id === id1).resultado, 'perdida');
+  assert.ok(sent.some((s) => s.payload.op === 'reject' && s.payload.id === id1 && s.payload.motivo === 'ocupado'), 'al llamante viejo se le avisó ocupado');
+  assert.equal(sent.filter((s) => s.payload.op === 'reject' && s.payload.id === id2).length, 0, 'a la llamada NUEVA no se le mandó ocupado');
+  assert.equal(timers.count(), 1, 'solo vive el timbre de la llamada nueva');
+});
+
+test('sesión: ocupado REAL en llamada conectada y viva sigue existiendo', async () => {
+  const { ses, sent } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setConnState('connected');
+  await ses.recibir('otroPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-9999999988888888', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  const rej = sent.find((s) => s.payload.op === 'reject' && s.payload.id === 'call-9999999988888888');
+  assert.ok(rej && rej.payload.motivo === 'ocupado', 'ocupado de verdad para la segunda llamada');
+  assert.equal(ses.state, 'conectada', 'la llamada viva no se tocó');
+});
+
+// --------------------------------------- v1.8.3: restart de ICE (datos móviles)
+
+test('payloads: el flag restart solo vive en offers y sobrevive al parse', () => {
+  const ro = buildCallPayload({ id: 'call-0123456789abcdef', op: 'offer', media: 'audio', sdp: 'SDP', restart: true });
+  assert.equal(ro.restart, true);
+  assert.deepEqual(parseCallPayload(JSON.stringify(ro)), ro);
+  const sin = buildCallPayload({ id: 'call-0123456789abcdef', op: 'offer', media: 'audio', sdp: 'SDP' });
+  assert.equal('restart' in sin, false);
+  const ans = parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-0123456789abcdef', op: 'answer', media: 'audio', sdp: 'SDP', restart: true }));
+  assert.equal(ans.restart, undefined, 'en un answer el flag no significa nada y se descarta');
+});
+
+test('sesión: ICE failed en conectando → UN restart con el mismo callId, y conecta', async () => {
+  const { ses, sent, eventos } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  assert.equal(ses.state, 'conectando');
+  ses.pc.setIceState('failed'); // primer fallo: NO se corta, se renegocia
+  await tick();
+  assert.equal(ses.state, 'conectando', 'la llamada sigue viva tras el primer failed');
+  assert.equal(eventos.filter((e) => e.tipo === 'terminada').length, 0);
+  const offers = sent.filter((s) => s.payload.op === 'offer');
+  assert.equal(offers.length, 2, 'salió una segunda offer');
+  assert.equal(offers[1].payload.id, ID, 'con el MISMO callId');
+  assert.equal(offers[1].payload.restart, true, 'marcada como restart');
+  assert.deepEqual(ses.pc.offerOpts.at(-1), { iceRestart: true }, 'createOffer pidió restart de ICE');
+  // El par responde al restart y esta vez el medio sí pasa:
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER-2' })));
+  assert.equal(ses.pc.remoteDescription.sdp, 'SDP-ANSWER-2');
+  ses.pc.setConnState('connected');
+  assert.equal(ses.state, 'conectada');
+});
+
+test('sesión: el mismo failed avisado por ICE y por connectionState cuenta UNA vez', async () => {
+  const { ses, sent } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setIceState('failed');
+  ses.pc.setConnState('failed'); // el navegador avisa por las dos vías
+  await tick();
+  assert.equal(sent.filter((s) => s.payload.op === 'offer' && s.payload.restart).length, 1, 'un solo restart');
+  assert.equal(ses.state, 'conectando', 'el segundo aviso no mató el restart en curso');
+});
+
+test('sesión: segundo failed tras el restart → sin-conexion de siempre', async () => {
+  const { ses, sent, eventos } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setIceState('failed');
+  await tick(); // el restart sale
+  assert.equal(sent.filter((s) => s.payload.op === 'offer' && s.payload.restart).length, 1);
+  ses.pc.setIceState('failed'); // el segundo intento también muere
+  await tick();
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
+  assert.ok(sent.some((s) => s.payload.op === 'end'), 'se avisó el cierre al par');
+  assert.equal(sent.filter((s) => s.payload.op === 'offer' && s.payload.restart).length, 1, 'no hubo tercer intento');
+});
+
+test('sesión: si el ICE muere en el RECEPTOR tras aceptar, él inicia el restart', async () => {
+  const { ses, sent } = mkSession();
+  const idX = 'call-aaaaaaaabbbbbbbb';
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP-REMOTA' })));
+  assert.equal(await ses.aceptar(), true);
+  assert.equal(ses.state, 'conectando');
+  ses.pc.setIceState('failed');
+  await tick();
+  const re = sent.filter((s) => s.payload.op === 'offer' && s.payload.restart);
+  assert.equal(re.length, 1, 'el receptor se volvió oferente de la renegociación');
+  assert.equal(re[0].payload.id, idX);
+  // El llamante responde con un answer a MI restart:
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER-DEL-OTRO' })));
+  assert.equal(ses.pc.remoteDescription.sdp, 'SDP-ANSWER-DEL-OTRO');
+  ses.pc.setConnState('connected');
+  assert.equal(ses.state, 'conectada');
+});
+
+test('sesión: offer de restart del par se responde con answer nuevo, sin sonar ni duplicar', async () => {
+  const { ses, sent, eventos } = mkSession();
+  const idX = 'call-aaaaaaaabbbbbbbb';
+  const offer = parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP-REMOTA' }));
+  await ses.recibir('peerPK', offer);
+  assert.equal(await ses.aceptar(), true);
+  assert.equal(sent.filter((s) => s.payload.op === 'answer').length, 1);
+  // Llega la renegociación del llamante: mismo id, restart:true.
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: idX, op: 'offer', media: 'audio', sdp: 'SDP-RESTART', restart: true })));
+  assert.equal(ses.pc.remoteDescription.sdp, 'SDP-RESTART', 'se aplicó la offer nueva');
+  assert.equal(sent.filter((s) => s.payload.op === 'answer').length, 2, 'salió un segundo answer');
+  assert.equal(ses.state, 'conectando');
+  assert.equal(eventos.filter((e) => e.tipo === 'entrante').length, 1, 'NO volvió a sonar: es la misma llamada');
+  // Y un duplicado ordinario del mismo id sigue ignorándose:
+  await ses.recibir('peerPK', offer);
+  assert.equal(sent.filter((s) => s.payload.op === 'answer').length, 2, 'sin tercer answer');
+});
+
+test('sesión: en conectada NO hay restart — un failed corta como siempre', async () => {
+  const { ses, sent, eventos } = mkSession();
+  await ses.llamar('peerPK', 'audio');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setConnState('connected');
+  assert.equal(ses.state, 'conectada');
+  ses.pc.setIceState('failed');
+  await tick();
+  assert.equal(ses.state, 'idle');
+  assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
+  assert.equal(sent.filter((s) => s.payload.op === 'offer').length, 1, 'no salió ninguna offer de restart');
 });
 
 // ------------------------------------------------------------ smoke jsdom

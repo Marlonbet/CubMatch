@@ -2209,7 +2209,10 @@ async function handleCallSignalEvent(ev) {
   if (payload.op === 'offer' && !offerEsFresca(ev.created_at, Math.floor(Date.now() / 1000))) return;
   // Candado del lado receptor: una videollamada sin triple
   // consentimiento ni suena — rechazo silencioso con motivo.
-  if (payload.op === 'offer' && payload.media === 'video') {
+  // (Una offer con restart:true NO es una llamada nueva: es la
+  // renegociación de ICE de la llamada en curso, ya consentida —
+  // pasa directa a la sesión, que la responde sin sonar.)
+  if (payload.op === 'offer' && payload.media === 'video' && payload.restart !== true) {
     const motivo = rechazoEntranteVideo(S.miPerfil, numMensajesChat(peer));
     if (motivo) {
       try {
