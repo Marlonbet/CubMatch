@@ -544,6 +544,42 @@ textarea { resize: vertical; }
 .stk-add-ico { font-size: 22px; }
 .stk-estado { font-size: 13.5px; color: var(--tierra-claro); min-height: 1.2em; margin: 8px 0 0; }
 
+/* llamadas de voz/video (v1.7.0) */
+#chat-video-btn.call-off { opacity: 0.45; }
+.msg.call-log { justify-content: center; margin: 6px 0; }
+.msg.call-log > span {
+  background: var(--superficie-2); color: var(--tierra-claro);
+  border: 1px solid var(--borde); border-radius: 999px;
+  padding: 3px 12px; font-size: 12.5px;
+}
+.call-overlay { z-index: 120; }
+.sheet.call { text-align: center; width: 100%; max-width: 430px; }
+.sheet.call .avatar.big { margin: 6px auto; display: block; border: 4px solid var(--superficie); box-shadow: var(--sombra); }
+.sheet.call h3 { margin: 6px 0 2px; font-size: 24px; font-weight: 800; }
+.call-tipo { margin: 0 0 2px; }
+.call-estado { font-size: 17px; font-weight: 600; margin: 6px 0 14px; }
+.call-actions { display: flex; justify-content: center; gap: 28px; padding: 6px 0 10px; }
+.call-btn {
+  width: 64px; height: 64px; border-radius: 50%; border: none; cursor: pointer;
+  font-size: 26px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--sombra);
+}
+.call-btn.ok { background: var(--verde); color: #fff; }
+.call-btn.no { background: var(--rojo); color: #fff; transform: rotate(135deg); }
+.call-btn.no[data-call="rechazar"] { transform: none; }
+.call-btn.mute { background: var(--superficie-3); }
+.call-videos {
+  position: relative; border-radius: var(--radio-lg); overflow: hidden;
+  background: #0b0f1c; aspect-ratio: 3 / 4; max-height: 52vh; margin-bottom: 10px;
+}
+.call-videos video { display: block; }
+#call-remote { width: 100%; height: 100%; object-fit: cover; }
+#call-local {
+  position: absolute; right: 10px; bottom: 10px; width: 30%; max-width: 120px;
+  aspect-ratio: 3 / 4; object-fit: cover; border-radius: var(--radio-sm);
+  border: 2px solid rgba(255, 255, 255, 0.75); background: #1a2138;
+}
+
 /* hoja de confirmación de ubicación */
 .sheet.loc h3 { margin: 4px 0 6px; color: var(--tierra); font-size: 22px; font-weight: 800; }
 

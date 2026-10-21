@@ -2,7 +2,13 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
+import { nip04 } from 'nostr-tools';
 import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido } from './red.js';
+import {
+  KIND_CALL, CallSession, buildCallPayload, parseCallPayload,
+  videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
+  iceServersConfig,
+} from './llamadas.js';
 import {
   passwordStrength, checkUsername, fetchNetCount, netcountFromCache, logoSVG,
   APP_URL, shareLinks, qrSVG,
@@ -152,6 +158,7 @@ export function dispose() {
   cuentaTimers = [];
   netcountRun++; // invalida el contador en vuelo
   stopChat();
+  stopCalls();
   setScreenScope(null);
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
@@ -495,6 +502,7 @@ async function enterApp(username, sk) {
   S.npub = id.npub;
   if (S.pool) { try { S.pool.shutdown(); } catch {} }
   S.pool = makePool(sk);
+  S.chats = chatsLS();
   setScreenScope('discovery');
   $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Buscando tu perfil…') + '</div>';
   let mine = null;
@@ -507,6 +515,7 @@ async function enterApp(username, sk) {
     S.obPaso = 1;
     showOnboarding();
   }
+  startCalls();
 }
 
 async function restoreSession(ses) {
@@ -517,6 +526,7 @@ async function restoreSession(ses) {
     S.pubkey = id.pubkey;
     S.npub = id.npub;
     S.pool = makePool(id.sk);
+    S.chats = chatsLS();
     setScreenScope('discovery');
     $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Reconectando…') + '</div>';
     let mine = null;
@@ -529,6 +539,7 @@ async function restoreSession(ses) {
       S.obPaso = 1;
       showOnboarding();
     }
+    startCalls();
   } catch {
     LS.del('sesion');
     showInicio();
@@ -1568,6 +1579,8 @@ function showChat(peerPubkey) {
     (prof ? avatarImg(peerPubkey, prof, 'avatar xs') : '') +
     '<b class="chat-nombre">' + esc(nombre) + '</b>' +
     '<span class="chat-acts">' +
+    '<button type="button" class="btn ghost sm" data-act="chat-call-voz" aria-label="Llamada de voz" title="Llamada de voz">📞</button>' +
+    '<button type="button" class="btn ghost sm" id="chat-video-btn" data-act="chat-call-video" aria-label="Videollamada" title="Videollamada">🎥</button>' +
     '<button type="button" class="btn ghost sm" data-act="chat-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
     '<button type="button" class="btn ghost sm" data-act="chat-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
     '</span></div>' +
@@ -1634,6 +1647,11 @@ function renderMsgs() {
     return;
   }
   box.innerHTML = msgs.map((m) => {
+    // Registro local de llamadas (v1.7.0): línea centrada, sin ticks.
+    if (m.tipo === 'call') {
+      return '<div class="msg call-log"><span>' + esc(m.text) +
+        ' <small class="muted">' + horaCorta(m.ts) + '</small></span></div>';
+    }
     const tick = m.from === 'me'
       ? '<span class="tick' + (m.read ? ' read' : '') + '">' + (m.read ? '✓✓' : '✓') + '</span>' : '';
     const meta = '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span>';
@@ -1655,6 +1673,18 @@ function renderMsgs() {
     return '<div class="msg ' + m.from + '"><div class="bubble">' + esc(m.text) + meta + '</div></div>';
   }).join('');
   box.scrollTop = box.scrollHeight;
+  refreshVideoBtn();
+}
+
+// El botón 🎥 refleja los candados del video en vivo: al llegar a los
+// 10 mensajes se "enciende" solo (si el otro acepta videollamadas).
+function refreshVideoBtn() {
+  const btn = document.getElementById('chat-video-btn');
+  if (!btn || !S.chatPeer) return;
+  const prof = S.perfilCache.get(S.chatPeer)?.profile;
+  const chk = videoDisponible(S.miPerfil, prof, numMensajesChat(S.chatPeer));
+  btn.classList.toggle('call-off', !chk.ok);
+  btn.title = chk.ok ? 'Videollamada' : chk.texto;
 }
 
 // Envía un DM al peer del chat abierto (texto plano o payload especial
@@ -1821,6 +1851,264 @@ async function onStickerChange(e) {
   }
 }
 
+// ---------- 7b. llamadas de voz y video (v1.7.0) ----------
+// WebRTC entre matches con señalización Nostr efímera (kind 21004,
+// cifrada NIP-04). La suscripción vive lo que dura la sesión (no una
+// pantalla): mantiene adquirido el scope de mensajería. La máquina de
+// estados y los candados de video están en llamadas.js (puros); aquí
+// viven el transporte real, el RTC real y la UI (overlays).
+let callSession = null;
+let callSub = null;
+let callScopeHeld = false;
+let callUiTimer = null;
+const sigCallOK = new Set(); // ids de señalización ya verificados (C1)
+
+// Dependencias reales de la sesión de llamada. Los tests las pueden
+// sustituir vía _test.setCallDeps (RTC/transporte falsos).
+const callDeps = {
+  send: (peer, payload) => sendCallSignal(peer, payload),
+  createPC: () => {
+    if (typeof RTCPeerConnection === 'undefined') return null;
+    try { return new RTCPeerConnection(iceServersConfig()); } catch { return null; }
+  },
+  getLocalStream: (media) => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return Promise.reject(new Error('getUserMedia no disponible'));
+    }
+    return navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: media === 'video' ? { facingMode: 'user' } : false,
+    });
+  },
+};
+
+async function sendCallSignal(peer, payload) {
+  const content = await nip04.encrypt(S.sk, peer, JSON.stringify(payload));
+  return S.pool.messaging().publish({ kind: KIND_CALL, tags: [['p', peer]], content });
+}
+
+function ensureCallSession() {
+  if (callSession) return callSession;
+  callSession = new CallSession({
+    send: (peer, p) => callDeps.send(peer, p),
+    createPC: () => callDeps.createPC(),
+    getLocalStream: (m) => callDeps.getLocalStream(m),
+    onEvent: onCallEvent,
+  });
+  return callSession;
+}
+
+function startCalls() {
+  stopCalls();
+  if (!S.pool || !S.sk) return;
+  S.pool.acquire('messaging'); // la señalización vive con la sesión
+  callScopeHeld = true;
+  ensureCallSession();
+  const since = Math.floor(Date.now() / 1000);
+  callSub = S.pool.messaging().subscribe(
+    [{ kinds: [KIND_CALL], '#p': [S.pubkey], since }],
+    (ev) => { void handleCallSignalEvent(ev); }
+  );
+}
+
+function stopCalls() {
+  if (callSub) { try { callSub.unsub(); } catch {} callSub = null; }
+  if (callSession) { try { callSession.abortar(); } catch {} callSession = null; }
+  closeCallOverlay();
+  if (callScopeHeld && S.pool) { try { S.pool.release('messaging'); } catch {} }
+  callScopeHeld = false;
+}
+
+function esMatch(peer) {
+  const d = S.data;
+  if (!d || !d.likes) return false;
+  return mutualMatches(d.likes.sent, d.likes.received).includes(peer);
+}
+
+// Mensajes "de verdad" de un chat (los registros de llamada llevan
+// tipo:'call' y no cuentan para la dinámica del video).
+function numMensajesChat(peer) {
+  return (S.chats[peer] || []).filter((m) => !m.tipo).length;
+}
+
+async function handleCallSignalEvent(ev) {
+  if (!ev || typeof ev.id !== 'string') return;
+  if (!sigCallOK.has(ev.id)) {
+    if (!eventoValido(ev)) { console.warn('[cubmatch] señalización con firma inválida, descartada:', ev.id); return; }
+    sigCallOK.add(ev.id);
+  }
+  const peer = ev.pubkey;
+  if (!peer || peer === S.pubkey) return;
+  if (S.bloqueados.includes(peer)) return;
+  if (!esMatch(peer)) return; // solo llamadas de matches
+  let payload;
+  try { payload = parseCallPayload(await nip04.decrypt(S.sk, peer, ev.content)); }
+  catch { return; }
+  if (!payload) return;
+  // Candado del lado receptor: una videollamada sin triple
+  // consentimiento ni suena — rechazo silencioso con motivo.
+  if (payload.op === 'offer' && payload.media === 'video') {
+    const motivo = rechazoEntranteVideo(S.miPerfil, numMensajesChat(peer));
+    if (motivo) {
+      try {
+        await sendCallSignal(peer, buildCallPayload({ id: payload.id, op: 'reject', media: 'video', motivo }));
+      } catch {}
+      return;
+    }
+  }
+  await ensureCallSession().recibir(peer, payload);
+}
+
+// Registro local de la llamada en su chat (solo en este teléfono).
+function registrarLlamada(peer, texto) {
+  if (!peer || !texto) return;
+  pushMsg(peer, {
+    id: 'call-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    from: 'me', ts: Date.now(), text: texto, read: true, tipo: 'call',
+  });
+  if (S.chatPeer === peer) renderMsgs();
+}
+
+function iniciarLlamada(media) {
+  const peer = S.chatPeer;
+  if (!peer) return;
+  ensureCallSession().llamar(peer, media);
+}
+
+function callNombre(peer) {
+  const prof = S.perfilCache.get(peer)?.profile;
+  return prof ? (prof.apodo || 'Tu match') : 'Tu match';
+}
+
+// ---- overlays de llamada (viven en <body>: sobreviven a la
+// navegación entre pantallas, a diferencia de los sheets de #app) ----
+function closeCallOverlay() {
+  if (callUiTimer) { clearInterval(callUiTimer); callUiTimer = null; }
+  const ov = document.getElementById('call-overlay');
+  if (ov) ov.remove();
+}
+
+function callAttachStreams() {
+  if (!callSession) return;
+  const lv = document.getElementById('call-local');
+  if (lv && callSession.localStream && lv.srcObject !== callSession.localStream) {
+    try { lv.srcObject = callSession.localStream; } catch {}
+  }
+  const rv = document.getElementById('call-remote');
+  if (rv && callSession.remoteStream && rv.srcObject !== callSession.remoteStream) {
+    try { rv.srcObject = callSession.remoteStream; } catch {}
+  }
+}
+
+function showCallOverlay(modo, peer, media) {
+  closeCallOverlay();
+  const prof = S.perfilCache.get(peer)?.profile;
+  const nombre = callNombre(peer);
+  const esVideo = media === 'video';
+  const ov = document.createElement('div');
+  ov.className = 'overlay call-overlay';
+  ov.id = 'call-overlay';
+  let acciones = '';
+  if (modo === 'entrante') {
+    acciones =
+      '<button type="button" class="call-btn ok" data-call="aceptar" aria-label="Aceptar llamada">📞</button>' +
+      '<button type="button" class="call-btn no" data-call="rechazar" aria-label="Rechazar llamada">✕</button>';
+  } else {
+    acciones =
+      '<button type="button" class="call-btn mute" data-call="mute" aria-label="Silenciar micrófono">🎙️</button>' +
+      '<button type="button" class="call-btn no" data-call="colgar" aria-label="Colgar">📞</button>';
+  }
+  ov.innerHTML =
+    '<div class="sheet call" role="dialog" aria-label="' + (esVideo ? 'Videollamada' : 'Llamada de voz') + '">' +
+    (esVideo
+      ? '<div class="call-videos"><video id="call-remote" autoplay playsinline></video>' +
+        '<video id="call-local" autoplay playsinline muted></video></div>'
+      : '') +
+    (prof ? avatarImg(peer, prof, 'avatar big') : '') +
+    '<h3>' + esc(nombre) + '</h3>' +
+    '<p class="call-tipo muted">' + (esVideo ? '🎥 Videollamada' : '📞 Llamada de voz') + '</p>' +
+    '<p class="call-estado" id="call-estado">' +
+    (modo === 'entrante' ? 'Llamada entrante…' : 'Llamando…') + '</p>' +
+    '<div class="call-actions">' + acciones + '</div>' +
+    '</div>';
+  ov.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-call]');
+    if (!btn || !callSession) return;
+    const act = btn.dataset.call;
+    if (act === 'aceptar') {
+      const box = ov.querySelector('.call-actions');
+      if (box) box.innerHTML =
+        '<button type="button" class="call-btn mute" data-call="mute" aria-label="Silenciar micrófono">🎙️</button>' +
+        '<button type="button" class="call-btn no" data-call="colgar" aria-label="Colgar">📞</button>';
+      const est = document.getElementById('call-estado');
+      if (est) est.textContent = 'Conectando…';
+      callSession.aceptar();
+    } else if (act === 'rechazar') callSession.rechazar();
+    else if (act === 'colgar') callSession.colgar();
+    else if (act === 'mute') {
+      const m = callSession.toggleMute();
+      btn.textContent = m ? '🔇' : '🎙️';
+      btn.setAttribute('aria-label', m ? 'Activar micrófono' : 'Silenciar micrófono');
+    }
+  });
+  document.body.appendChild(ov);
+  callAttachStreams();
+}
+
+function onCallEvent(e) {
+  if (!e || !e.tipo) return;
+  if (e.tipo === 'entrante') {
+    showCallOverlay('entrante', e.peer, e.media);
+    try { if (navigator.vibrate) navigator.vibrate([300, 120, 300]); } catch {}
+  } else if (e.tipo === 'saliente') {
+    showCallOverlay('saliendo', e.peer, e.media);
+  } else if (e.tipo === 'stream-local' || e.tipo === 'stream-remoto') {
+    callAttachStreams();
+  } else if (e.tipo === 'conectada') {
+    const est = document.getElementById('call-estado');
+    if (est) est.textContent = 'En llamada · ' + fmtDuracion(callSession ? callSession.duracionSeg() : 0);
+    if (callUiTimer) clearInterval(callUiTimer);
+    callUiTimer = setInterval(() => {
+      const el = document.getElementById('call-estado');
+      if (el && callSession) el.textContent = 'En llamada · ' + fmtDuracion(callSession.duracionSeg());
+    }, 500);
+    S.timers.push(callUiTimer);
+  } else if (e.tipo === 'terminada') {
+    closeCallOverlay();
+    const nombre = callNombre(e.peer);
+    switch (e.resultado) {
+      case 'completada':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
+        break;
+      case 'perdida':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'perdida' }));
+        toast('📞 Llamada perdida de ' + nombre + '.');
+        break;
+      case 'sin-respuesta':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'sin-respuesta' }));
+        toast(nombre + ' no respondió.');
+        break;
+      case 'rechazada':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'rechazada' }));
+        toast(nombre + ' no pudo atender ahora.');
+        break;
+      case 'ocupado':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'rechazada' }));
+        toast(nombre + ' está en otra llamada.');
+        break;
+      case 'sin-conexion':
+        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'sin-conexion' }));
+        toast('No se pudo conectar: las redes de ambos no permitieron la conexión directa.');
+        break;
+      case 'error':
+        toast(e.mensaje || 'No se pudo completar la llamada.');
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 // ---------- 8. ajustes ----------
 function showAjustes() {
   setScreenScope('both');
@@ -1845,6 +2133,10 @@ function showAjustes() {
     '<button type="button" class="btn ghost sm" data-act="aj-relays-reset">Restablecer relays</button></section>' +
     '<section class="aj-sec"><h3>Datos</h3>' +
     '<label class="check"><input type="checkbox" id="aj-datosbajos"' + (S.datosBajos ? ' checked' : '') + '> Modo datos bajos <small class="muted">(descubre menos perfiles por vez)</small></label>' +
+    '</section>' +
+    '<section class="aj-sec"><h3>Llamadas</h3>' +
+    '<p class="muted small">Con tus matches puedes hablar por <b>voz</b> desde el primer mensaje. El <b>video</b> pide tres acuerdos: haber conversado ya (10+ mensajes en el chat), que actives esta opción y que aceptes cada videollamada cuando suene.</p>' +
+    '<label class="check"><input type="checkbox" id="aj-videook"' + (S.miPerfil && S.miPerfil.videoOk ? ' checked' : '') + '> Acepto videollamadas <small class="muted">(tu preferencia viaja en tu perfil publicado, para que quien te llame la pueda ver)</small></label>' +
     '</section>' +
     '<section class="aj-sec"><h3>Compartir</h3>' +
     '<p class="muted small">Mientras más gente conozca CubMatch, mejores matches para todos.</p>' +
@@ -1876,6 +2168,27 @@ function showAjustes() {
     S.data = null; // recargar con el nuevo límite la próxima vez
     toast(tgl.checked ? 'Modo datos bajos activado.' : 'Modo datos bajos desactivado.');
   });
+  const tglV = $('#aj-videook');
+  if (tglV) tglV.addEventListener('change', () => { void toggleVideoOk(tglV.checked); });
+}
+
+// Opt-in de videollamadas: vive en el perfil publicado (kind 30079)
+// para que el que llama compruebe el consentimiento antes de marcar.
+// Mismo patrón que toggleOculto: cambio optimista + republicar; si la
+// red falla, se revierte.
+async function toggleVideoOk(ok) {
+  if (!S.miPerfil) { toast('Primero publica tu perfil.'); showAjustes(); return; }
+  S.miPerfil.videoOk = !!ok;
+  try {
+    await publishPerfilAndDocs(S.miPerfil);
+    const b = LS.get('perfil', null);
+    if (b) { b.videoOk = !!ok; LS.set('perfil', b); }
+    toast(ok ? 'Ahora aceptas videollamadas 🎥' : 'Ya no aceptas videollamadas.');
+  } catch {
+    S.miPerfil.videoOk = !ok;
+    toast('Sin conexión a los relays. Intenta de nuevo.');
+    showAjustes();
+  }
 }
 
 async function publicarActualizacion() {
@@ -1916,6 +2229,7 @@ async function toggleOculto(ocultar) {
 function cerrarSesion() {
   if (!confirm('¿Cerrar sesión en este teléfono? Tu perfil sigue publicado en la red.')) return;
   stopChat();
+  stopCalls();
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
   LS.del('sesion');
@@ -1926,10 +2240,12 @@ function restablecerRelays() {
   LS.del('relays');
   S.relayStatus = {};
   if (S.pool && S.sk) {
+    stopCalls();
     try { S.pool.shutdown(); } catch {}
     S.pool = makePool(S.sk);
     screenScope = null;
     setScreenScope('both');
+    startCalls();
   }
   toast('Relays restablecidos. Reconectando…');
   showAjustes();
@@ -1938,6 +2254,7 @@ function restablecerRelays() {
 function borrarDatos() {
   if (!confirm('¿Borrar TODOS los datos locales de CubMatch en este teléfono? (incluye tu sesión)')) return;
   stopChat();
+  stopCalls();
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
   const keys = [];
@@ -2117,6 +2434,15 @@ const ACTIONS = {
   },
   'chat-reportar': (el) => reportarPerfil(el.dataset.peer),
   'chat-bloquear': (el) => bloquearPerfil(el.dataset.peer),
+  'chat-call-voz': () => iniciarLlamada('audio'),
+  'chat-call-video': () => {
+    const peer = S.chatPeer;
+    if (!peer) return;
+    const prof = S.perfilCache.get(peer)?.profile;
+    const chk = videoDisponible(S.miPerfil, prof, numMensajesChat(peer));
+    if (!chk.ok) { toast(chk.texto); return; }
+    iniciarLlamada('video');
+  },
   'chat-loc': () => showLocConfirm(),
   'chat-loc-si': () => enviarUbicacion(),
   'chat-loc-no': () => closeLocConfirm(),
@@ -2150,7 +2476,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

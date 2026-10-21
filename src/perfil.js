@@ -106,6 +106,10 @@ export function newProfile() {
     intereses: [], tags: [],
     bio: '', prompts: [], tresPalabras: '', fotoURL: '', mostrarEdad: true,
     prefs: { edadMin: 18, edadMax: 99, generos: [], distancia: 'cuba', relacion: [] },
+    // Videollamadas (v1.7.0): opt-in del receptor, por defecto NO.
+    // Viaja en el perfil publicado (kind 30079) para que quien llama
+    // pueda comprobarlo antes de marcar.
+    videoOk: false,
     oculto: false,
     actualizado: Date.now(),
   };
