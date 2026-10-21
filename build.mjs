@@ -35,6 +35,23 @@ let js = result.outputFiles[0].text;
 if (!js.includes('__APP_VERSION__')) throw new Error('falta el placeholder __APP_VERSION__');
 js = js.replace('__APP_VERSION__', () => version);
 
+// Credenciales de Cloudflare TURN (v1.9.0, src/turncf.js): el bundle
+// trae los placeholders __TURNCF_KEY_ID__ / __TURNCF_TOKEN__. SOLO se
+// sustituyen por valores reales si el entorno define TURNCF_INJECT
+// apuntando a un JSON {keyId, token}; sin esa variable se borran
+// (cadena vacía) y la función queda desactivada. split/join en vez
+// de replace: los valores no deben sufrir patrones $ del reemplazo.
+let turncfKeyId = '', turncfToken = '';
+if (process.env.TURNCF_INJECT) {
+  const inj = JSON.parse(readFileSync(process.env.TURNCF_INJECT, 'utf8'));
+  turncfKeyId = String(inj.keyId || '');
+  turncfToken = String(inj.token || '');
+}
+for (const [placeholder, valor] of [['__TURNCF_KEY_ID__', turncfKeyId], ['__TURNCF_TOKEN__', turncfToken]]) {
+  if (!js.includes(placeholder)) throw new Error('falta el placeholder ' + placeholder);
+  js = js.split(placeholder).join(valor);
+}
+
 // Versión viva (remota)
 writeFileSync(join(live, 'cubmatch-live.js'), js);
 writeFileSync(join(live, 'version.js'), `window.__CUBMATCH_REMOTE_VERSION=${JSON.stringify(version)};\n`);

@@ -18,6 +18,15 @@
 // también falla, la llamada no conecta y la UI lo dice con
 // honestidad.
 //
+// Relevo prioritario (v1.9.0): Cloudflare Realtime TURN, con
+// credenciales temporales pedidas a su API al momento de la llamada
+// (módulo turncf.js; solo activo si el build inyectó credenciales).
+// La configuración ICE se obtiene de un proveedor asíncrono
+// (inyectable; por defecto obtenerIceServers): Cloudflare fresco
+// primero, OpenRelay + STUN de siempre después. Si Cloudflare falla
+// o está desactivado, la configuración es exactamente la anterior:
+// la llamada NUNCA depende de Cloudflare.
+//
 // Blindaje de estados (v1.8.3, anti-ocupado fantasma): ningún estado
 // sin conexión viva puede vivir eternamente. Causas cazadas en la
 // v1.8.1: `conectando` no tenía NINGÚN temporizador (al responder
@@ -43,9 +52,12 @@
 //   sabe antes de marcar (su app lee el perfil) y el receptor, por
 //   si el dato del llamante estaba viejo, rechaza en silencio.
 //
-// Este módulo es puro (sin DOM): la máquina de estados recibe el
-// transporte (send), la fábrica de RTCPeerConnection y getUserMedia
-// inyectados, para probarla en Node con falsos.
+// Este módulo es casi puro (sin DOM): la máquina de estados recibe
+// el transporte (send), la fábrica de RTCPeerConnection, getUserMedia
+// y el proveedor de configuración ICE inyectados, para probarla en
+// Node con falsos. La única dependencia es turncf.js (también puro).
+
+import { getCfIceServers } from './turncf.js';
 
 export const KIND_CALL = 21004; // efímero: señalización de llamada
 export const CALL_V = 1;
@@ -105,6 +117,41 @@ export function iceServersConfig() {
     { urls: STUN_URLS.slice() },
     { urls: TURN_URLS.slice(), username: TURN_USER, credential: TURN_PASS },
   ];
+}
+
+// ------------------------------------------------------- fusión con Cloudflare
+
+// Fusiona los iceServers de Cloudflare (si los hay) con la
+// configuración base (OpenRelay + STUN), Cloudflare PRIMERO y sin
+// URLs duplicadas: una URL ya aportada por un servidor anterior se
+// quita de los siguientes (la respuesta de Cloudflare ya trae su
+// propio STUN, que en la base también está). Con cfServers
+// null/vacío devuelve la configuración base intacta.
+export function fusionarIceServers(cfServers, base = iceServersConfig()) {
+  const vistos = new Set();
+  const salida = [];
+  const empujar = (entry) => {
+    if (!entry || entry.urls == null) return;
+    const urls = (Array.isArray(entry.urls) ? entry.urls : [entry.urls])
+      .filter((u) => typeof u === 'string' && u !== '' && !vistos.has(u));
+    if (!urls.length) return;
+    for (const u of urls) vistos.add(u);
+    salida.push({ ...entry, urls });
+  };
+  if (Array.isArray(cfServers)) for (const e of cfServers) empujar(e);
+  for (const e of base) empujar(e);
+  return salida;
+}
+
+// Proveedor ICE por defecto de CallSession: pide a Cloudflare sus
+// credenciales temporales (turncf.js) y fusiona con la base. Nunca
+// lanza y nunca devuelve vacío: sin Cloudflare (desactivado en el
+// build, red caída, timeout) la configuración es EXACTAMENTE la de
+// siempre — la llamada no depende de Cloudflare.
+export async function obtenerIceServers({ force = false, cfFn } = {}) {
+  let cf = null;
+  try { cf = await (typeof cfFn === 'function' ? cfFn : getCfIceServers)({ force }); } catch { cf = null; }
+  return fusionarIceServers(cf);
 }
 
 // ------------------------------------------------------------ ids
@@ -263,13 +310,18 @@ export function textoRegistroLlamada({ media, resultado, durSeg } = {}) {
 // resultado: 'completada' | 'perdida' | 'sin-respuesta' | 'rechazada'
 //          | 'ocupado' | 'sin-conexion' | 'error'
 export class CallSession {
-  constructor({ send, createPC, getLocalStream, onEvent, setTimeoutFn, clearTimeoutFn, nowFn, rng } = {}) {
+  constructor({ send, createPC, getLocalStream, onEvent, setTimeoutFn, clearTimeoutFn, nowFn, rng, getIceServers } = {}) {
     if (typeof send !== 'function') throw new Error('CallSession: falta send');
     if (typeof createPC !== 'function') throw new Error('CallSession: falta createPC');
     if (typeof getLocalStream !== 'function') throw new Error('CallSession: falta getLocalStream');
     this._send = send;
     this._createPC = createPC;
     this._getLocalStream = getLocalStream;
+    // Proveedor asíncrono de configuración ICE (v1.9.0): se consulta
+    // ANTES de crear cada RTCPeerConnection y en el restart de ICE.
+    // Inyectable en tests; por defecto, obtenerIceServers (Cloudflare
+    // fresco + base). La fábrica createPC recibe la config resultante.
+    this._getIceServers = typeof getIceServers === 'function' ? getIceServers : null;
     this._onEvent = typeof onEvent === 'function' ? onEvent : () => {};
     this._setT = setTimeoutFn || ((fn, ms) => setTimeout(fn, ms));
     this._clearT = clearTimeoutFn || ((t) => clearTimeout(t));
@@ -297,6 +349,19 @@ export class CallSession {
 
   duracionSeg() {
     return this._connectedAt ? Math.max(0, Math.floor((this._now() - this._connectedAt) / 1000)) : 0;
+  }
+
+  // Configuración ICE vigente vía el proveedor (inyectado o el por
+  // defecto). Nunca lanza ni devuelve vacío: en el peor caso, la
+  // configuración base de siempre (OpenRelay + STUN).
+  async _pedirIceServers(opts) {
+    try {
+      const cfg = this._getIceServers
+        ? await this._getIceServers(opts)
+        : await obtenerIceServers(opts);
+      if (Array.isArray(cfg) && cfg.length) return cfg;
+    } catch {}
+    return iceServersConfig();
   }
 
   _emit(e) { try { this._onEvent(e); } catch {} }
@@ -514,6 +579,20 @@ export class CallSession {
 
   // ------------------------------------------------- restart de ICE
 
+  // Pide la configuración ICE de nuevo y la aplica al pc en curso
+  // con setConfiguration. El proveedor (turncf) solo renueva las
+  // credenciales de Cloudflare si su caché pasó de 6 h; con la
+  // caché joven reutiliza las que hay. Si el pc no soporta
+  // setConfiguration, se sigue con la config de nacimiento.
+  async _refrescarConfigPc(cur) {
+    if (!this.pc || this.current !== cur) return;
+    const iceServers = await this._pedirIceServers();
+    if (!this.pc || this.current !== cur) return;
+    if (typeof this.pc.setConfiguration === 'function') {
+      try { this.pc.setConfiguration({ iceServers }); } catch {}
+    }
+  }
+
   // ICE llegó a `failed`. En `conectando` hay UNA segunda
   // oportunidad: renegociar con restart de ICE (credenciales nuevas,
   // candidatos nuevos — a menudo el primer intento muere por una
@@ -544,6 +623,8 @@ export class CallSession {
     cur.restartEnCurso = true;
     try {
       if (!this.pc || this.current !== cur) return;
+      await this._refrescarConfigPc(cur); // config ICE fresca antes de renegociar
+      if (!this.pc || this.current !== cur) return;
       const offer = await this.pc.createOffer({ iceRestart: true });
       if (this.current !== cur || !this.pc) return;
       await this.pc.setLocalDescription(offer);
@@ -565,6 +646,8 @@ export class CallSession {
   async _responderRestart(cur, payload) {
     cur.restartEnCurso = true;
     try {
+      if (!this.pc || this.current !== cur) return;
+      await this._refrescarConfigPc(cur); // también reúne candidatos con config fresca
       if (!this.pc || this.current !== cur) return;
       await this.pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
       if (this.current !== cur || !this.pc) return;
@@ -680,8 +763,15 @@ export class CallSession {
     }
     this.localStream = stream;
     this._emit({ tipo: 'stream-local', stream });
+    // Config ICE vigente (Cloudflare fresco si lo hay) ANTES de
+    // crear el pc: la fábrica la recibe y construye con ella.
+    const iceServers = await this._pedirIceServers();
+    if (this.current !== cur) { // abortada mientras pedía la config
+      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      return false;
+    }
     let pc;
-    try { pc = this._createPC(); } catch { pc = null; }
+    try { pc = this._createPC(iceServers); } catch { pc = null; }
     if (!pc) {
       this._reset();
       this._emit({
@@ -836,8 +926,14 @@ export class CallSession {
     }
     this.localStream = stream;
     this._emit({ tipo: 'stream-local', stream });
+    // Igual que al llamar: config ICE vigente antes de crear el pc.
+    const iceServers = await this._pedirIceServers();
+    if (this.current !== cur) { // abortada mientras pedía la config
+      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      return false;
+    }
     let pc;
-    try { pc = this._createPC(); } catch { pc = null; }
+    try { pc = this._createPC(iceServers); } catch { pc = null; }
     if (!pc) {
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
       this._terminar('error', 'Este navegador no soporta llamadas (WebRTC no disponible).');

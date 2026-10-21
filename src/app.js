@@ -2120,9 +2120,15 @@ const sigCallOK = new Set(); // ids de señalización ya verificados (C1)
 // sustituir vía _test.setCallDeps (RTC/transporte falsos).
 const callDeps = {
   send: (peer, payload) => sendCallSignal(peer, payload),
-  createPC: () => {
+  // La sesión pide la config ICE vigente (proveedor de llamadas.js:
+  // Cloudflare fresco + base) y la pasa aquí ANTES de crear el pc.
+  createPC: (iceServers) => {
     if (typeof RTCPeerConnection === 'undefined') return null;
-    try { return new RTCPeerConnection(iceServersConfig()); } catch { return null; }
+    try {
+      return new RTCPeerConnection({
+        iceServers: iceServers && iceServers.length ? iceServers : iceServersConfig(),
+      });
+    } catch { return null; }
   },
   getLocalStream: (media) => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -2144,7 +2150,7 @@ function ensureCallSession() {
   if (callSession) return callSession;
   callSession = new CallSession({
     send: (peer, p) => callDeps.send(peer, p),
-    createPC: () => callDeps.createPC(),
+    createPC: (iceServers) => callDeps.createPC(iceServers),
     getLocalStream: (m) => callDeps.getLocalStream(m),
     onEvent: onCallEvent,
   });

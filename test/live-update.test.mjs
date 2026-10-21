@@ -81,6 +81,8 @@ test('loader dist: incluye fallback + boot con la versión', () => {
   assert.ok(html.includes('__CUBMATCH_REMOTE_VERSION'), 'referencia a version.js');
   assert.ok(!html.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
   assert.ok(!html.includes('__BUNDLED_VERSION__'), 'sin placeholders sin reemplazar');
+  assert.ok(!html.includes('__TURNCF_KEY_ID__'), 'placeholder de Cloudflare TURN sin reemplazar');
+  assert.ok(!html.includes('__TURNCF_TOKEN__'), 'placeholder de Cloudflare TURN sin reemplazar');
   assert.ok(html.includes(pkg.version), 'la versión está en el html');
   assert.ok(html.includes('id="app"'), 'contenedor de la app');
 });

@@ -13,7 +13,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, nip04 } from 'nostr-too
 import {
   KIND_CALL, buildCallPayload, parseCallPayload, newCallId,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
-  iceServersConfig, offerEsFresca, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
+  iceServersConfig, fusionarIceServers, obtenerIceServers, offerEsFresca, CallSession, MIN_MSGS_VIDEO, RING_TIMEOUT_MS,
   RING_IN_TIMEOUT_MS, CONNECT_TIMEOUT_MS, ICE_DISCONNECTED_GRACE_MS,
 } from '../src/llamadas.js';
 
@@ -159,6 +159,7 @@ class FakePC {
   async setLocalDescription(d) { this.localDescription = d; }
   async setRemoteDescription(d) { this.remoteDescription = d; }
   async addIceCandidate(c) { this.candidates = this.candidates || []; this.candidates.push(c); }
+  setConfiguration(cfg) { this.configurations = this.configurations || []; this.configurations.push(cfg); }
   close() { this.closed = true; }
   setConnState(st) { this.connectionState = st; if (this.onconnectionstatechange) this.onconnectionstatechange(); }
   setIceState(st) { this.iceConnectionState = st; if (this.oniceconnectionstatechange) this.oniceconnectionstatechange(); }
@@ -672,6 +673,111 @@ test('sesión: en conectada NO hay restart — un failed corta como siempre', as
   assert.equal(ses.state, 'idle');
   assert.equal(eventos.find((e) => e.tipo === 'terminada').resultado, 'sin-conexion');
   assert.equal(sent.filter((s) => s.payload.op === 'offer').length, 1, 'no salió ninguna offer de restart');
+});
+
+// --------------------------------------- v1.9.0: Cloudflare TURN prioritario
+
+test('fusionarIceServers: Cloudflare primero, sin URLs duplicadas; sin CF = base intacta', () => {
+  const cf = [
+    { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.cloudflare.com:53'] },
+    {
+      urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'],
+      username: 'temporal', credential: 'temporal',
+    },
+  ];
+  const m = fusionarIceServers(cf);
+  assert.equal(m.length, 4);
+  assert.deepEqual(m[0], cf[0], 'el STUN de Cloudflare va primero, tal cual');
+  assert.deepEqual(m[1], cf[1], 'el TURN de Cloudflare va segundo, tal cual');
+  // La base conserva sus STUN menos el que Cloudflare ya aportó:
+  assert.deepEqual(m[2].urls, ['stun:stunserver.stunprotocol.org:3478', 'stun:stun.l.google.com:19302']);
+  // Y OpenRelay queda intacto, de respaldo:
+  assert.deepEqual(m[3], iceServersConfig()[1]);
+  const todas = m.flatMap((e) => e.urls);
+  assert.equal(new Set(todas).size, todas.length, 'ninguna URL aparece dos veces');
+  // Sin Cloudflare (null / vacío / basura): EXACTAMENTE la config de siempre.
+  assert.deepEqual(fusionarIceServers(null), iceServersConfig());
+  assert.deepEqual(fusionarIceServers([]), iceServersConfig());
+  assert.deepEqual(fusionarIceServers(undefined), iceServersConfig());
+});
+
+test('obtenerIceServers: fusiona lo de Cloudflare; si falla o está apagado, la base exacta', async () => {
+  const cf = [{ urls: 'turns:turn.cloudflare.com:443?transport=tcp', username: 'u', credential: 'c' }];
+  const ok = await obtenerIceServers({ cfFn: async () => cf });
+  assert.deepEqual(ok[0], { urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' },
+    'lo de Cloudflare va primero (urls en string se normaliza a array)');
+  assert.deepEqual(ok.at(-1), iceServersConfig()[1], 'OpenRelay sigue de respaldo');
+  // CF que lanza (red caída): respaldo idéntico al actual, sin lanzar.
+  const sinRed = await obtenerIceServers({ cfFn: async () => { throw new Error('sin red'); } });
+  assert.deepEqual(sinRed, iceServersConfig());
+  // CF desactivado (null): lo mismo.
+  const apagado = await obtenerIceServers({ cfFn: async () => null });
+  assert.deepEqual(apagado, iceServersConfig());
+});
+
+test('sesión: la config del proveedor llega a la fábrica del pc al llamar y al contestar', async () => {
+  const CFG = [{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }];
+  // Al llamar:
+  let cfgA = null;
+  const a = mkSession({
+    getIceServers: async () => CFG,
+    createPC: (cfg) => { cfgA = cfg; return new FakePC(); },
+  });
+  assert.equal(await a.ses.llamar('peerPK', 'audio'), true);
+  assert.deepEqual(cfgA, CFG, 'createPC recibió la config del proveedor');
+  // Al contestar:
+  let cfgB = null;
+  const b = mkSession({
+    getIceServers: async () => CFG,
+    createPC: (cfg) => { cfgB = cfg; return new FakePC(); },
+  });
+  await b.ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: 'call-aaaaaaaabbbbbbbb', op: 'offer', media: 'audio', sdp: 'SDP' })));
+  assert.equal(await b.ses.aceptar(), true);
+  assert.deepEqual(cfgB, CFG, 'también en el lado que contesta');
+});
+
+test('sesión: sin proveedor inyectado y con Cloudflare apagado (placeholders), el pc nace con la config de siempre', async () => {
+  let cfgNacimiento = null;
+  const { ses } = mkSession({ createPC: (cfg) => { cfgNacimiento = cfg; return new FakePC(); } });
+  assert.equal(await ses.llamar('peerPK', 'audio'), true);
+  assert.deepEqual(cfgNacimiento, iceServersConfig(), 'el proveedor por defecto cae a la base exacta');
+});
+
+test('sesión: proveedor ICE que lanza o devuelve vacío → respaldo a la config base', async () => {
+  let cfg1 = null;
+  const a = mkSession({
+    getIceServers: async () => { throw new Error('proveedor roto'); },
+    createPC: (cfg) => { cfg1 = cfg; return new FakePC(); },
+  });
+  assert.equal(await a.ses.llamar('peerPK', 'audio'), true, 'la llamada no depende del proveedor');
+  assert.deepEqual(cfg1, iceServersConfig());
+  let cfg2 = null;
+  const b = mkSession({
+    getIceServers: async () => null,
+    createPC: (cfg) => { cfg2 = cfg; return new FakePC(); },
+  });
+  assert.equal(await b.ses.llamar('peerPK', 'audio'), true);
+  assert.deepEqual(cfg2, iceServersConfig());
+});
+
+test('sesión: el restart pide la config de nuevo y la aplica con setConfiguration antes de renegociar', async () => {
+  const CFG_A = [{ urls: ['stun:stun-a.ejemplo:3478'] }];
+  const CFG_B = [{ urls: ['turns:turn-b.ejemplo:443'], username: 'u2', credential: 'c2' }];
+  let pedidos = 0; let cfgCreacion = null; let pcRef = null;
+  const { ses, sent } = mkSession({
+    getIceServers: async () => (++pedidos === 1 ? CFG_A : CFG_B),
+    createPC: (cfg) => { cfgCreacion = cfg; pcRef = new FakePC(); return pcRef; },
+  });
+  await ses.llamar('peerPK', 'audio');
+  assert.deepEqual(cfgCreacion, CFG_A, 'el pc nació con la primera config');
+  await ses.recibir('peerPK', parseCallPayload(JSON.stringify({ t: 'call', v: 1, id: ID, op: 'answer', media: 'audio', sdp: 'SDP-ANSWER' })));
+  ses.pc.setIceState('failed'); // primer fallo en conectando → restart
+  await tick();
+  assert.equal(pedidos, 2, 'el restart volvió a pedir la configuración');
+  assert.deepEqual(pcRef.configurations, [{ iceServers: CFG_B }], 'setConfiguration aplicó la config refrescada');
+  assert.ok(sent.some((s) => s.payload.op === 'offer' && s.payload.restart), 'la renegociación salió con la config nueva');
+  ses.pc.setConnState('connected');
+  assert.equal(ses.state, 'conectada');
 });
 
 // ------------------------------------------------------------ smoke jsdom
