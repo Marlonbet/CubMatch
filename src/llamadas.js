@@ -18,14 +18,15 @@
 // también falla, la llamada no conecta y la UI lo dice con
 // honestidad.
 //
-// Relevo prioritario (v1.9.0): Cloudflare Realtime TURN, con
-// credenciales temporales pedidas a su API al momento de la llamada
-// (módulo turncf.js; solo activo si el build inyectó credenciales).
-// La configuración ICE se obtiene de un proveedor asíncrono
-// (inyectable; por defecto obtenerIceServers): Cloudflare fresco
-// primero, OpenRelay + STUN de siempre después. Si Cloudflare falla
-// o está desactivado, la configuración es exactamente la anterior:
-// la llamada NUNCA depende de Cloudflare.
+// Relevo prioritario (v1.9.1): Metered / Open Relay TURN con la
+// cuenta propia del dueño, con credenciales pedidas a su API al
+// momento de la llamada (módulo turnmd.js; solo activo si el build
+// inyectó la cuenta). La configuración ICE se obtiene de un
+// proveedor asíncrono (inyectable; por defecto obtenerIceServers):
+// lo de Metered fresco primero, OpenRelay público + STUN de
+// siempre después. Si Metered falla o está desactivado, la
+// configuración es exactamente la anterior: la llamada NUNCA
+// depende de la cuenta de Metered.
 //
 // Blindaje de estados (v1.8.3, anti-ocupado fantasma): ningún estado
 // sin conexión viva puede vivir eternamente. Causas cazadas en la
@@ -55,9 +56,9 @@
 // Este módulo es casi puro (sin DOM): la máquina de estados recibe
 // el transporte (send), la fábrica de RTCPeerConnection, getUserMedia
 // y el proveedor de configuración ICE inyectados, para probarla en
-// Node con falsos. La única dependencia es turncf.js (también puro).
+// Node con falsos. La única dependencia es turnmd.js (también puro).
 
-import { getCfIceServers } from './turncf.js';
+import { getMeteredIceServers } from './turnmd.js';
 
 export const KIND_CALL = 21004; // efímero: señalización de llamada
 export const CALL_V = 1;
@@ -119,15 +120,14 @@ export function iceServersConfig() {
   ];
 }
 
-// ------------------------------------------------------- fusión con Cloudflare
+// ------------------------------------------------------- fusión con Metered
 
-// Fusiona los iceServers de Cloudflare (si los hay) con la
-// configuración base (OpenRelay + STUN), Cloudflare PRIMERO y sin
-// URLs duplicadas: una URL ya aportada por un servidor anterior se
-// quita de los siguientes (la respuesta de Cloudflare ya trae su
-// propio STUN, que en la base también está). Con cfServers
-// null/vacío devuelve la configuración base intacta.
-export function fusionarIceServers(cfServers, base = iceServersConfig()) {
+// Fusiona los iceServers de Metered (si los hay) con la
+// configuración base (OpenRelay público + STUN), Metered PRIMERO y
+// sin URLs duplicadas: una URL ya aportada por un servidor anterior
+// se quita de los siguientes. Con mdServers null/vacío devuelve la
+// configuración base intacta.
+export function fusionarIceServers(mdServers, base = iceServersConfig()) {
   const vistos = new Set();
   const salida = [];
   const empujar = (entry) => {
@@ -138,20 +138,21 @@ export function fusionarIceServers(cfServers, base = iceServersConfig()) {
     for (const u of urls) vistos.add(u);
     salida.push({ ...entry, urls });
   };
-  if (Array.isArray(cfServers)) for (const e of cfServers) empujar(e);
+  if (Array.isArray(mdServers)) for (const e of mdServers) empujar(e);
   for (const e of base) empujar(e);
   return salida;
 }
 
-// Proveedor ICE por defecto de CallSession: pide a Cloudflare sus
-// credenciales temporales (turncf.js) y fusiona con la base. Nunca
-// lanza y nunca devuelve vacío: sin Cloudflare (desactivado en el
-// build, red caída, timeout) la configuración es EXACTAMENTE la de
-// siempre — la llamada no depende de Cloudflare.
-export async function obtenerIceServers({ force = false, cfFn } = {}) {
-  let cf = null;
-  try { cf = await (typeof cfFn === 'function' ? cfFn : getCfIceServers)({ force }); } catch { cf = null; }
-  return fusionarIceServers(cf);
+// Proveedor ICE por defecto de CallSession: pide a Metered las
+// credenciales de la cuenta del dueño (turnmd.js) y fusiona con la
+// base. Nunca lanza y nunca devuelve vacío: sin Metered
+// (desactivado en el build, red caída, timeout) la configuración
+// es EXACTAMENTE la de siempre — la llamada no depende de la
+// cuenta de Metered.
+export async function obtenerIceServers({ force = false, mdFn } = {}) {
+  let md = null;
+  try { md = await (typeof mdFn === 'function' ? mdFn : getMeteredIceServers)({ force }); } catch { md = null; }
+  return fusionarIceServers(md);
 }
 
 // ------------------------------------------------------------ ids
@@ -319,7 +320,7 @@ export class CallSession {
     this._getLocalStream = getLocalStream;
     // Proveedor asíncrono de configuración ICE (v1.9.0): se consulta
     // ANTES de crear cada RTCPeerConnection y en el restart de ICE.
-    // Inyectable en tests; por defecto, obtenerIceServers (Cloudflare
+    // Inyectable en tests; por defecto, obtenerIceServers (Metered
     // fresco + base). La fábrica createPC recibe la config resultante.
     this._getIceServers = typeof getIceServers === 'function' ? getIceServers : null;
     this._onEvent = typeof onEvent === 'function' ? onEvent : () => {};
@@ -580,8 +581,8 @@ export class CallSession {
   // ------------------------------------------------- restart de ICE
 
   // Pide la configuración ICE de nuevo y la aplica al pc en curso
-  // con setConfiguration. El proveedor (turncf) solo renueva las
-  // credenciales de Cloudflare si su caché pasó de 6 h; con la
+  // con setConfiguration. El proveedor (turnmd) solo renueva las
+  // credenciales de Metered si su caché pasó de 6 h; con la
   // caché joven reutiliza las que hay. Si el pc no soporta
   // setConfiguration, se sigue con la config de nacimiento.
   async _refrescarConfigPc(cur) {
@@ -763,7 +764,7 @@ export class CallSession {
     }
     this.localStream = stream;
     this._emit({ tipo: 'stream-local', stream });
-    // Config ICE vigente (Cloudflare fresco si lo hay) ANTES de
+    // Config ICE vigente (Metered fresco si lo hay) ANTES de
     // crear el pc: la fábrica la recibe y construye con ella.
     const iceServers = await this._pedirIceServers();
     if (this.current !== cur) { // abortada mientras pedía la config

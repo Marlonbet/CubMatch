@@ -2121,7 +2121,7 @@ const sigCallOK = new Set(); // ids de señalización ya verificados (C1)
 const callDeps = {
   send: (peer, payload) => sendCallSignal(peer, payload),
   // La sesión pide la config ICE vigente (proveedor de llamadas.js:
-  // Cloudflare fresco + base) y la pasa aquí ANTES de crear el pc.
+  // Metered fresco + base) y la pasa aquí ANTES de crear el pc.
   createPC: (iceServers) => {
     if (typeof RTCPeerConnection === 'undefined') return null;
     try {

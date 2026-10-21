@@ -675,48 +675,50 @@ test('sesión: en conectada NO hay restart — un failed corta como siempre', as
   assert.equal(sent.filter((s) => s.payload.op === 'offer').length, 1, 'no salió ninguna offer de restart');
 });
 
-// --------------------------------------- v1.9.0: Cloudflare TURN prioritario
+// --------------------------------------- v1.9.1: Metered TURN prioritario
 
-test('fusionarIceServers: Cloudflare primero, sin URLs duplicadas; sin CF = base intacta', () => {
-  const cf = [
-    { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.cloudflare.com:53'] },
+test('fusionarIceServers: Metered primero, sin URLs duplicadas; sin Metered = base intacta', () => {
+  const md = [
+    { urls: 'stun:stun.relay.metered.ca:80' },
     {
-      urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'],
+      urls: ['turn:global.relay.metered.ca:80', 'turn:global.relay.metered.ca:443', 'turns:global.relay.metered.ca:443?transport=tcp'],
       username: 'temporal', credential: 'temporal',
     },
+    { urls: 'stun:stun.l.google.com:19302' }, // se solapa con un STUN de la base
   ];
-  const m = fusionarIceServers(cf);
-  assert.equal(m.length, 4);
-  assert.deepEqual(m[0], cf[0], 'el STUN de Cloudflare va primero, tal cual');
-  assert.deepEqual(m[1], cf[1], 'el TURN de Cloudflare va segundo, tal cual');
-  // La base conserva sus STUN menos el que Cloudflare ya aportó:
-  assert.deepEqual(m[2].urls, ['stun:stunserver.stunprotocol.org:3478', 'stun:stun.l.google.com:19302']);
-  // Y OpenRelay queda intacto, de respaldo:
-  assert.deepEqual(m[3], iceServersConfig()[1]);
+  const m = fusionarIceServers(md);
+  assert.equal(m.length, 5);
+  assert.deepEqual(m[0], { urls: ['stun:stun.relay.metered.ca:80'] }, 'el STUN de Metered va primero (urls en string se normaliza)');
+  assert.deepEqual(m[1], md[1], 'el TURN de Metered va segundo, tal cual');
+  assert.deepEqual(m[2], { urls: ['stun:stun.l.google.com:19302'] }, 'la entrada solapada de Metered también queda, una sola vez');
+  // La base conserva sus STUN menos el que Metered ya aportó:
+  assert.deepEqual(m[3].urls, ['stun:stun.cloudflare.com:3478', 'stun:stunserver.stunprotocol.org:3478']);
+  // Y OpenRelay público queda intacto, de respaldo:
+  assert.deepEqual(m[4], iceServersConfig()[1]);
   const todas = m.flatMap((e) => e.urls);
   assert.equal(new Set(todas).size, todas.length, 'ninguna URL aparece dos veces');
-  // Sin Cloudflare (null / vacío / basura): EXACTAMENTE la config de siempre.
+  // Sin Metered (null / vacío / basura): EXACTAMENTE la config de siempre.
   assert.deepEqual(fusionarIceServers(null), iceServersConfig());
   assert.deepEqual(fusionarIceServers([]), iceServersConfig());
   assert.deepEqual(fusionarIceServers(undefined), iceServersConfig());
 });
 
-test('obtenerIceServers: fusiona lo de Cloudflare; si falla o está apagado, la base exacta', async () => {
-  const cf = [{ urls: 'turns:turn.cloudflare.com:443?transport=tcp', username: 'u', credential: 'c' }];
-  const ok = await obtenerIceServers({ cfFn: async () => cf });
-  assert.deepEqual(ok[0], { urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' },
-    'lo de Cloudflare va primero (urls en string se normaliza a array)');
+test('obtenerIceServers: fusiona lo de Metered; si falla o está apagado, la base exacta', async () => {
+  const md = [{ urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: 'u', credential: 'c' }];
+  const ok = await obtenerIceServers({ mdFn: async () => md });
+  assert.deepEqual(ok[0], { urls: ['turns:global.relay.metered.ca:443?transport=tcp'], username: 'u', credential: 'c' },
+    'lo de Metered va primero (urls en string se normaliza a array)');
   assert.deepEqual(ok.at(-1), iceServersConfig()[1], 'OpenRelay sigue de respaldo');
-  // CF que lanza (red caída): respaldo idéntico al actual, sin lanzar.
-  const sinRed = await obtenerIceServers({ cfFn: async () => { throw new Error('sin red'); } });
+  // Metered que lanza (red caída): respaldo idéntico al actual, sin lanzar.
+  const sinRed = await obtenerIceServers({ mdFn: async () => { throw new Error('sin red'); } });
   assert.deepEqual(sinRed, iceServersConfig());
-  // CF desactivado (null): lo mismo.
-  const apagado = await obtenerIceServers({ cfFn: async () => null });
+  // Metered desactivado (null): lo mismo.
+  const apagado = await obtenerIceServers({ mdFn: async () => null });
   assert.deepEqual(apagado, iceServersConfig());
 });
 
 test('sesión: la config del proveedor llega a la fábrica del pc al llamar y al contestar', async () => {
-  const CFG = [{ urls: ['turns:turn.cloudflare.com:443?transport=tcp'], username: 'u', credential: 'c' }];
+  const CFG = [{ urls: ['turns:global.relay.metered.ca:443?transport=tcp'], username: 'u', credential: 'c' }];
   // Al llamar:
   let cfgA = null;
   const a = mkSession({
@@ -736,7 +738,7 @@ test('sesión: la config del proveedor llega a la fábrica del pc al llamar y al
   assert.deepEqual(cfgB, CFG, 'también en el lado que contesta');
 });
 
-test('sesión: sin proveedor inyectado y con Cloudflare apagado (placeholders), el pc nace con la config de siempre', async () => {
+test('sesión: sin proveedor inyectado y con Metered apagado (placeholders), el pc nace con la config de siempre', async () => {
   let cfgNacimiento = null;
   const { ses } = mkSession({ createPC: (cfg) => { cfgNacimiento = cfg; return new FakePC(); } });
   assert.equal(await ses.llamar('peerPK', 'audio'), true);
