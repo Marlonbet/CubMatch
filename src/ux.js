@@ -4,7 +4,7 @@
 //  - disponibilidad de nombre de usuario (chequeo en relays)
 //  - logo cubano en SVG inline (reemplaza al emoji ❤️‍🔥)
 
-import { fetchUsernameClaim } from './cuentas.js';
+import { fetchUsernameClaim, nombreOcupado } from './cuentas.js';
 import { KIND_PERFIL, TAG_T, parsePerfilEvent } from './cubmatch.js';
 import { eventoValido } from './red.js';
 
@@ -84,7 +84,7 @@ export async function fetchNetCount(pool, { limit = 500 } = {}) {
 // sigue siendo el de submitCuenta; esto es solo feedback en vivo.
 export async function checkUsername(pool, username) {
   const claim = await fetchUsernameClaim(pool, username);
-  if (claim) return 'tomado';
+  if (claim && await nombreOcupado(pool, claim)) return 'tomado';
   const client = pool.discovery();
   const anyOpen = client.relays.some((u) => client.status(u) === 'open');
   return anyOpen ? 'disponible' : 'sin-red';

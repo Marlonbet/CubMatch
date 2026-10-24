@@ -94,16 +94,26 @@ test('netcountFromCache: expirada o malformada → null', () => {
 });
 
 // ---------- checkUsername ----------
-function fakePool({ claimEv = null, open = true } = {}) {
+// Pool falso que respeta los filtros (kinds/authors/#d), como un relay real.
+function fakePool({ eventos = [], open = true } = {}) {
   const client = {
     relays: ['wss://x.test'],
     status: () => (open ? 'open' : 'down'),
     subscribe: (filters, cb) => {
-      if (claimEv) setImmediate(() => cb(claimEv));
+      setImmediate(() => {
+        for (const ev of eventos) {
+          for (const f of filters) {
+            if (f.kinds && !f.kinds.includes(ev.kind)) continue;
+            if (f.authors && !f.authors.includes(ev.pubkey)) continue;
+            if (f['#d'] && !ev.tags.some((t) => t[0] === 'd' && f['#d'].includes(t[1]))) continue;
+            cb(ev);
+          }
+        }
+      });
       return { eose: () => new Promise((r) => setImmediate(r)), unsub() {} };
     },
   };
-  return { discovery: () => client, scopeDegraded: () => false };
+  return { discovery: () => client, messaging: () => client, scopeDegraded: () => false };
 }
 
 function claimFirmado(username) {
@@ -111,9 +121,17 @@ function claimFirmado(username) {
   return finalizeEvent({ ...buildClaimEvent(username), created_at: 1700000000 }, sk);
 }
 
-test('checkUsername: reclamo existente → tomado', async () => {
-  const pool = fakePool({ claimEv: claimFirmado('marlon') });
+test('checkUsername: reclamo corroborado (10002 del mismo pubkey) → tomado', async () => {
+  const sk = generateSecretKey();
+  const claimEv = finalizeEvent({ ...buildClaimEvent('marlon'), created_at: 1700000000 }, sk);
+  const docEv = finalizeEvent({ kind: 10002, created_at: 1700000000, tags: [], content: '' }, sk);
+  const pool = fakePool({ eventos: [claimEv, docEv] });
   assert.equal(await checkUsername(pool, 'marlon'), 'tomado');
+});
+
+test('checkUsername: reclamo pelado (M4, v1.11.2) → disponible', async () => {
+  const pool = fakePool({ eventos: [claimFirmado('marlon')] });
+  assert.equal(await checkUsername(pool, 'marlon'), 'disponible');
 });
 
 test('checkUsername: sin reclamo y relay abierto → disponible', async () => {

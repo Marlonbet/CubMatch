@@ -10,13 +10,15 @@
 // Si la olvidas, la identidad se pierde.
 // (Patrón heredado de Espectro; reclamo en kind 30078 con d="cubmatch:perfil:<usuario>".)
 //
-// Seguridad (revisión 2026-10):
+// Seguridad (revisión 2026-10; resto de M4 cerrado en v1.11.2):
 //  · El created_at de un reclamo lo elige quien lo publica, así que NO es
 //    una prueba de "quién llegó primero". Antes, publicar un reclamo con
 //    created_at=1 dejaba fuera de su propia cuenta al dueño legítimo. Ahora
 //    el login acepta CUALQUIER reclamo cuyo pubkey coincida con el derivado
-//    de las credenciales (verifyCredentials); el orden solo sirve para
-//    decidir quién "ocupa" el nombre al registrarse.
+//    de las credenciales (verifyCredentials), y el registro solo trata el
+//    nombre como ocupado si algún reclamante está corroborado
+//    (nombreOcupado): un reclamo pelado con created_at=1 ya no "ocupa"
+//    el nombre por adelantado.
 //  · La clave sale de una contraseña y la pubkey y el salt son públicos, así
 //    que cualquiera puede probar contraseñas OFFLINE contra un perfil. Mitigación:
 //    contraseñas nuevas más largas (validateNewPassword) y scrypt más caro
@@ -26,6 +28,7 @@
 import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { getPublicKey, nip19 } from 'nostr-tools';
 import { eventoValido } from './red.js';
+import { KIND_PERFIL, KIND_RELAY_LIST, KIND_DM_INBOX, TAG_D } from './cubmatch.js';
 
 export const KIND_CLAIM = 30078;
 export const claimTag = (username) => `cubmatch:perfil:${username}`;
@@ -148,9 +151,54 @@ export function parseClaimEvent(ev) {
   return { username: body.username, pubkey: ev.pubkey, created_at: ev.created_at, id: ev.id };
 }
 
+// ¿Algún reclamo de este nombre está corroborado? Un reclamo "pelado"
+// (solo el evento 30078, sin nada más del mismo pubkey) NO ocupa el
+// nombre: cualquiera puede publicar un reclamo válido con created_at=1
+// para "ocupar" nombres por adelantado (M4, resto tras la v1.11.0: el
+// login ya no se bloquea, pero el registro sí se bloqueaba con cualquier
+// reclamo). El flujo real de registro publica junto al reclamo los
+// documentos de identidad (10002/10050), y al completar el perfil el
+// 30079: si ALGÚN reclamante tiene alguno de esos eventos con firma
+// válida, el nombre está ocupado. Se revisan TODOS los reclamos, no solo
+// el "ganador" por created_at: un squatter con created_at=1 ganaría ese
+// orden pero no la corroboración. Un nombre sin corroborar puede
+// registrarse: el nuevo registro publica reclamo + documentos y pasa a
+// ser el ocupante corroborado; el login del reclamante anterior (si lo
+// era) sigue funcionando vía verifyCredentials.
+export async function nombreOcupado(pool, claim) {
+  if (!claim) return false;
+  const pubkeys = [...new Set(
+    [claim.pubkey, ...((claim.todos || []).map((c) => c && c.pubkey))]
+      .filter((p) => typeof p === 'string' && p)
+  )];
+  if (!pubkeys.length) return false;
+  const corroborados = new Set();
+  const run = (client) => new Promise((resolve) => {
+    const sub = client.subscribe(
+      [{ kinds: [KIND_RELAY_LIST, KIND_DM_INBOX, KIND_PERFIL], authors: pubkeys, limit: pubkeys.length }],
+      (ev) => {
+        if (!ev || !pubkeys.includes(ev.pubkey)) return;
+        if (ev.kind !== KIND_RELAY_LIST && ev.kind !== KIND_DM_INBOX && ev.kind !== KIND_PERFIL) return;
+        if (!eventoValido(ev)) return;
+        if (ev.kind === KIND_PERFIL) {
+          const d = (ev.tags || []).find((t) => t[0] === 'd') || [];
+          if (d[1] !== TAG_D) return;
+        }
+        corroborados.add(ev.pubkey);
+      }
+    );
+    sub.eose().then(() => { sub.unsub(); resolve(); });
+  });
+  await run(pool.discovery());
+  if (!corroborados.size && pool.scopeDegraded('discovery')) await run(pool.messaging());
+  return corroborados.size > 0;
+}
+
 // De varios reclamos del mismo usuario, el de created_at más bajo. OJO: ese
 // campo lo elige el autor del evento, así que NO prueba quién fue primero;
-// solo se usa para decidir de forma estable quién "ocupa" un nombre.
+// solo se conserva por compatibilidad (formato anterior y atajo en
+// verifyCredentials). Quién "ocupa" un nombre lo decide nombreOcupado(),
+// no este orden.
 export function pickEarliestClaim(parsed) {
   if (!parsed.length) return null;
   return parsed.reduce((a, b) => (b.created_at < a.created_at ? b : a));

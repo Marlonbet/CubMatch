@@ -15,7 +15,7 @@ import {
 } from './ux.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
-  buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
+  buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf, nombreOcupado,
 } from './cuentas.js';
 import {
   KIND_PERFIL, KIND_LIKE, profileAddr, parseLikeEvent, integrarLikeEntrante,
@@ -510,7 +510,9 @@ async function submitCuenta() {
     try {
       const claim = await fetchUsernameClaim(tmp, username);
       if (S.cuentaModo === 'registro') {
-        if (claim) throw new Error('Ese usuario ya está tomado. Prueba con otro.');
+        // M4: un reclamo pelado (sin documentos ni perfil del reclamante)
+        // no ocupa el nombre; solo un reclamante corroborado lo bloquea.
+        if (claim && await nombreOcupado(tmp, claim)) throw new Error('Ese usuario ya está tomado. Prueba con otro.');
         btn.textContent = 'Reclamando tu usuario…';
         await tmp.publishAll(buildClaimEvent(username));
         // Documentos de identidad: NIP-65 (10002, mis relays) e inbox
