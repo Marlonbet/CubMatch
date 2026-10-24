@@ -2,6 +2,7 @@
 // perfiles en red, disponibilidad de usuario y logo cubano.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { finalizeEvent, generateSecretKey, getPublicKey } from 'nostr-tools';
 import {
   passwordStrength, contarPerfiles, netcountFromCache, NETCOUNT_TTL_MS,
@@ -143,4 +144,14 @@ test('logoSVG: variant evita colisiones de ids', () => {
   assert.ok(a.includes('cm-corazon-deck'));
   assert.ok(!logoSVG(30).includes('cm-corazon-deck'));
   assert.ok(logoSVG(16).includes('width="16"'));
+});
+
+// ---------- borde redondeado de los campos de texto (fix v1.10.2) ----------
+// El CSS estila input[type="text"] (border-radius 14px); un <input> sin
+// atributo type no casa con ese selector y perdía el estilo (Apodo,
+// Municipio, Profesión, Religión, Tags, Tres palabras, prompts).
+test('inputs de texto: todos llevan type explícito para recibir el borde redondeado', () => {
+  const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
+  const bare = [...src.matchAll(/<input(?![^>]*\btype=)[^>]*>/g)].map(m => m[0]);
+  assert.deepEqual(bare, [], 'inputs sin type explícito: ' + JSON.stringify(bare));
 });

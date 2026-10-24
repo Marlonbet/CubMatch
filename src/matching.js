@@ -1,4 +1,4 @@
-// CUBMATCH — motor de matching v2, 100% en cliente.
+// CUBMATCH — motor de matching v2.1, 100% en cliente.
 // Puro (sin DOM): testeable en Node. ES module.
 //
 // Modelo v2 (rediseño para pools pequeños): el v1 fallaba por EXCLUSIÓN —
@@ -8,31 +8,62 @@
 //     género mutuo y tipo de relación en común. Nada más excluye.
 //   · Todo lo demás son factores BLANDOS que multiplican el score:
 //       score = gate · (0.35·afinidad + 0.25·ajuste mutuo + 0.15·geo
-//                       + 0.10·actividad + 0.15·reciprocidad) + jitter
+//                       + 0.10·actividad + 0.15·interés) + jitter
 //     gate = gate de completitud (min de ambos): <0.40 → 0 (no aparece).
 //   · La afinidad compara SOLO campos que ambos llenaron (el vacío es
 //     neutro y los pesos se renormalizan), con texto normalizado sin
-//     acentos e idf suavizado (pools pequeños).
+//     acentos, stemming ligero ("bailar" ≈ "baile") e idf suavizado.
 //   · Quien ya me dio like NO compite en el mazo: va a la fila
 //     "Le gustas" (likesYou), que solo exige los filtros duros.
 //   · Los dislikes reaparecen a los 21 días; los likes enviados, nunca.
 //   · Pool pequeño (<30): se reintenta con suelo 0.25 y tolerancia de
 //     edad 10, marcado como relajado.
+//   · Pool diminuto (<15 tras relajar): último recurso — suelo 0,
+//     tolerancia de edad 15 y el tipo de relación deja de excluir (se
+//     penaliza ×0.6). Siempre se muestra como «Explorar».
 //   · Jitter determinista ±0.05 (semilla: día + ambas pubkeys) contra el
 //     estancamiento: mismo orden todo el día para mí, distinto mañana.
+//
+// Cambios v2.1 respecto a v2:
+//   · FIX reciprocity(): un dislike enviado ya NO cuenta como interés
+//     (antes daba +0.3 a los dislikes que reaparecían a los 21 días).
+//   · El 5º factor (clave `rec`, peso 0.15) es ahora la "señal de
+//     interés": 1.0 si me dio like, 0.3 si yo le di like y, para el
+//     resto (todo el mazo, ya que esos dos casos salen de él), la
+//     PREFERENCIA APRENDIDA de mis propios swipes (buildPrefModel).
+//     Antes valía 0 para todos los candidatos del mazo.
+//   · La preferencia aprendida es 100% local: usa solo ctx.likes.sent y
+//     los perfiles ya descargados. Entra con ≥5 swipes y pesa por
+//     completo desde 25.
+//   · Actividad: si el llamador aporta ctx.ultimaActividad
+//     {pubkey: ts_seg} (presencia, último like/DM) se usa el más
+//     reciente entre eso y el created_at del perfil (que es solo la
+//     última EDICIÓN del perfil).
 
 import { completitud, nivelDistancia } from './perfil.js';
 
 // Pesos de la fórmula v2. Suman 1.0.
+// `reciprocity` es el peso de la señal de interés (ver cabecera).
 export const WEIGHTS_V2 = { affinity: 0.35, mutual: 0.25, geo: 0.15, activity: 0.10, reciprocity: 0.15 };
 
 export const GATE_FLOOR = 0.4;          // suelo de completitud normal
 export const GATE_FLOOR_RELAXED = 0.25; // suelo con pool pequeño
 export const POOL_MIN = 30;             // por debajo → relajación
+export const POOL_BAJO = 15;            // por debajo tras relajar → modo mínimo
 export const TOL_EDAD = 5;              // años de decaimiento de ageFit
 export const TOL_EDAD_RELAXED = 10;
+export const TOL_EDAD_MINIMA = 15;
 export const DIAS_REAPARICION = 21;     // los dislikes vuelven a los 21 días
 export const JITTER_MAX = 0.05;
+export const REL_PENALIZACION = 0.6;    // sin tipo de relación en común (modo mínimo)
+
+// Aprendizaje local de preferencias.
+export const MIN_SWIPES = 5;            // swipes mínimos para activar el modelo
+export const SWIPES_PLENO = 25;         // con ≥25 swipes pesa al 100 %
+export const PREF_SEMIVIDA_DIAS = 90;   // un swipe pesa la mitad a los 90 días
+export const PREF_PESO_DISLIKE = 0.6;   // el dislike es una señal más ruidosa
+export const PREF_PESO_SUPERLIKE = 1.5;
+export const PREF_CONTRACCION = 3;      // evidencia mínima antes de fiarse
 
 const DIA_SEC = 86400;
 const REAPARICION_SEC = DIAS_REAPARICION * DIA_SEC;
@@ -47,6 +78,27 @@ export function normTerm(s) {
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
     .toLowerCase();
+}
+
+// Stemming ligero para texto libre (intereses/tags): quita plural,
+// infinitivo/gerundio y la vocal final, de modo que "bailar", "baile",
+// "bailes" y "bailando" caen en "bail". Solo para comparar TEXTO LIBRE;
+// los campos categóricos (religión, hábitos…) siguen usando normTerm.
+// Palabras de ≤4 letras no se tocan.
+function stemPalabra(w) {
+  if (w.length <= 4) return w;
+  let s = w;
+  if (s.endsWith('es') && s.length > 5) s = s.slice(0, -2);
+  else if (s.endsWith('s')) s = s.slice(0, -1);
+  for (const suf of ['iendo', 'ando', 'ar', 'er', 'ir']) {
+    if (s.endsWith(suf) && s.length - suf.length >= 3) return s.slice(0, -suf.length);
+  }
+  if (s.length > 4 && 'aeo'.includes(s[s.length - 1])) s = s.slice(0, -1);
+  return s;
+}
+
+export function stemTerm(raw) {
+  return normTerm(raw).split(/\s+/).filter(Boolean).map(stemPalabra).join(' ');
 }
 
 // Hash determinista FNV-1a (32 bits) — semilla del jitter diario.
@@ -82,10 +134,19 @@ function diaDe(nowMs) { return new Date(nowMs).toISOString().slice(0, 10); }
 
 // ------------------------------------------------------- filtros duros
 
+// ¿Comparten al menos un tipo de relación buscado?
+export function relacionEnComun(mp, op) {
+  const a = (mp && mp.prefs && mp.prefs.relacion) || [];
+  const b = (op && op.prefs && op.prefs.relacion) || [];
+  return a.some((r) => b.includes(r));
+}
+
 // SOLO incompatibilidades reales: identidad, bloqueo, mayoría de edad,
 // género mutuo y tipo de relación en común. La completitud, la edad
 // exacta, la distancia y el "ya visto" ya NO excluyen: pesan en el score.
-export function hardPass(me, other) {
+// opts.relajarRelacion: el tipo de relación deja de excluir (solo se usa
+// en el modo mínimo de rankCandidates; score() lo penaliza).
+export function hardPass(me, other, opts = {}) {
   if (!me || !other || !me.profile || !other.profile) return false;
   if (other.pubkey === me.pubkey) return false;
   if ((me.bloqueados || []).includes(other.pubkey)) return false;
@@ -102,8 +163,7 @@ export function hardPass(me, other) {
   if (!(prefsOther.generos || []).includes(mp.genero)) return false;
 
   // Relación: intersección no vacía.
-  const relMe = prefsMe.relacion || [], relOther = prefsOther.relacion || [];
-  if (!relMe.some((r) => relOther.includes(r))) return false;
+  if (!opts.relajarRelacion && !relacionEnComun(mp, op)) return false;
 
   return true;
 }
@@ -169,12 +229,14 @@ export function activityScore(created_at, nowSec) {
 }
 
 // Reciprocidad de likes: 1.0 si el otro ya me dio '+'; 0.3 si yo le di
-// like; 0.0 si no hay nada.
+// '+'; 0.0 en cualquier otro caso. (v2.0 contaba también el dislike
+// enviado como 0.3: un error, ya corregido.)
 export function reciprocity(peerPubkey, likes) {
   const l = likes || { sent: {}, received: {} };
   const rec = l.received && l.received[peerPubkey];
   if (rec && rec.tipo === '+') return 1.0;
-  if (l.sent && l.sent[peerPubkey]) return 0.3;
+  const sent = l.sent && l.sent[peerPubkey];
+  if (sent && sent.tipo === '+') return 0.3;
   return 0.0;
 }
 
@@ -189,12 +251,12 @@ export function jitterDiario(myPubkey, otherPubkey, dayStr) {
 // ---------------------------------------------------------- afinidad
 
 // Términos de un perfil: valores + intereses + tags, normalizados sin
-// acentos y sin duplicados dentro del perfil.
+// acentos, con stemming y sin duplicados dentro del perfil.
 function termsOf(profile) {
   const set = new Set();
   for (const arr of [profile.valores, profile.intereses, profile.tags]) {
     for (const t of (arr || [])) {
-      const s = normTerm(t);
+      const s = stemTerm(t);
       if (s) set.add(s);
     }
   }
@@ -308,6 +370,84 @@ export function affinity(pa, pb, corpus) {
   return comps.reduce((s, [w, v]) => s + w * v, 0) / tw;
 }
 
+// ------------------------------------------------ preferencia aprendida
+
+// Campos categóricos que también alimentan el modelo aprendido.
+const CAMPOS_CAT = ['fumador', 'bebedor', 'deporte', 'hijosQuiere', 'religion', 'mascotas'];
+
+// Rasgos de un perfil para el modelo: sus términos (stemmed) y sus
+// valores categóricos ("cat:fumador=no").
+function featuresOf(profile) {
+  const p = profile || {};
+  const out = termsOf(p);
+  for (const c of CAMPOS_CAT) {
+    const v = normTerm(p[c]);
+    if (v) out.push(`cat:${c}=${v}`);
+  }
+  return out;
+}
+
+// Modelo de preferencia aprendido de MIS swipes (100 % local).
+//   likesSent: ctx.likes.sent {pubkey: {tipo:'+'|'-', ts, superlike?}}
+//   others:    perfiles ya descargados [{pubkey, profile}]
+// Cada swipe suma (like) o resta (dislike, con menos peso) a cada
+// rasgo del perfil al que se lo di, con decaimiento de 90 días de
+// semivida. avg[rasgo] ∈ [−1, 1] se contrae hacia 0 cuando hay poca
+// evidencia. Devuelve { n, avg }; n = swipes con perfil conocido.
+export function buildPrefModel(others, likesSent, ctx) {
+  const porPk = new Map();
+  for (const o of others || []) if (o && o.pubkey && o.profile) porPk.set(o.pubkey, o);
+  const nowSec = nowSecOf(ctx);
+  const suma = {}, abs = {};
+  let n = 0;
+  for (const [pk, s] of Object.entries(likesSent || {})) {
+    const o = porPk.get(pk);
+    if (!o || !s || (s.tipo !== '+' && s.tipo !== '-')) continue;
+    n++;
+    const dias = Math.max(0, (nowSec - (Number(s.ts) || nowSec)) / DIA_SEC);
+    const decay = Math.pow(0.5, dias / PREF_SEMIVIDA_DIAS);
+    const signo = s.tipo === '+' ? (s.superlike ? PREF_PESO_SUPERLIKE : 1) : -PREF_PESO_DISLIKE;
+    for (const f of featuresOf(o.profile)) {
+      suma[f] = (suma[f] || 0) + signo * decay;
+      abs[f] = (abs[f] || 0) + decay;
+    }
+  }
+  const avg = {};
+  for (const f of Object.keys(suma)) {
+    avg[f] = Math.max(-1, Math.min(1, suma[f] / (abs[f] + 1)));
+  }
+  return { n, avg };
+}
+
+// Cuánto se parece `profile` a lo que me ha gustado: 0..1 (0.5 =
+// neutro). null si no comparte ningún rasgo con mi historial.
+export function prefScore(model, profile) {
+  if (!model || !model.avg) return null;
+  let s = 0, m = 0;
+  for (const f of featuresOf(profile)) {
+    const v = model.avg[f];
+    if (v === undefined) continue;
+    s += v;
+    m++;
+  }
+  if (!m) return null;
+  const x = Math.max(-1, Math.min(1, s / (m + PREF_CONTRACCION)));
+  return (x + 1) / 2;
+}
+
+// Señal de interés (5º factor, clave `rec`): reciprocidad explícita si
+// existe; si no, la preferencia aprendida, escalada por cuántos swipes
+// hay (0 hasta MIN_SWIPES, 100 % desde SWIPES_PLENO).
+export function interestSignal(other, ctx) {
+  const r = reciprocity(other && other.pubkey, ctx && ctx.likes);
+  if (r > 0) return r;
+  const m = ctx && ctx.prefModel;
+  if (!m || !(m.n >= MIN_SWIPES)) return 0;
+  const g = Math.min(1, m.n / SWIPES_PLENO);
+  const p = prefScore(m, other && other.profile);
+  return g * (p === null ? 0.5 : p);
+}
+
 // ------------------------------------------------------- vistos/likes
 
 // ¿Debe ocultarse este perfil del mazo por "ya visto"?
@@ -354,8 +494,8 @@ export function likesYou(me, others, ctx) {
 
 // ------------------------------------------------------------ score
 
-// Score v2 entre me y other.
-// ctx = { corpus, likes: { sent, received }, nowMs }
+// Score v2.1 entre me y other.
+// ctx = { corpus, likes: { sent, received }, nowMs, prefModel?, ultimaActividad? }
 // opts = { floor, tol } (suelo de completitud y tolerancia de edad).
 export function score(me, other, ctx, opts = {}) {
   const floor = typeof opts.floor === 'number' ? opts.floor : GATE_FLOOR;
@@ -364,11 +504,18 @@ export function score(me, other, ctx, opts = {}) {
   const aff = affinity(me.profile, other.profile, ctx && ctx.corpus);
   const mut = mutualFit(me.profile, other.profile, tol);
   const geo = distFit(me.profile, other.profile);
-  const act = activityScore(other.created_at, nowSecOf(ctx));
-  const rec = reciprocity(other.pubkey, ctx && ctx.likes);
+  // Actividad: lo más reciente entre la última edición del perfil y,
+  // si el llamador la aporta, la última actividad real (presencia/DM/like).
+  const ultima = ctx && ctx.ultimaActividad ? Number(ctx.ultimaActividad[other.pubkey]) : NaN;
+  const ts = Math.max(Number(other.created_at) || 0, Number.isFinite(ultima) ? ultima : 0);
+  const act = activityScore(ts, nowSecOf(ctx));
+  const rec = interestSignal(other, ctx);
   const parts = { affinity: aff, mutual: mut, geo, act, rec };
-  const base = WEIGHTS_V2.affinity * aff + WEIGHTS_V2.mutual * mut + WEIGHTS_V2.geo * geo
+  let base = WEIGHTS_V2.affinity * aff + WEIGHTS_V2.mutual * mut + WEIGHTS_V2.geo * geo
     + WEIGHTS_V2.activity * act + WEIGHTS_V2.reciprocity * rec;
+  // Sin tipo de relación en común (solo alcanzable en el modo mínimo,
+  // donde hardPass ya no lo exige): castigo suave en vez de exclusión.
+  if (!relacionEnComun(me.profile, other.profile)) base *= REL_PENALIZACION;
   const jitter = jitterDiario(me.pubkey, other.pubkey, diaDe(nowMsOf(ctx)));
   const total = gate * base + jitter;
   return { total, base, gate, parts };
@@ -386,11 +533,21 @@ export function compatLabel(total, relajado = false) {
 
 // ----------------------------------------------------------- ranking
 
+// Añade el modelo de preferencia aprendida al ctx (una sola vez por
+// ranking) si hay swipes enviados y el llamador no aportó uno propio.
+function conModelo(ctx, others) {
+  const c = ctx || {};
+  if (c.prefModel) return c;
+  const sent = c.likes && c.likes.sent;
+  if (!sent || !Object.keys(sent).length) return c;
+  return { ...c, prefModel: buildPrefModel(others, sent, c) };
+}
+
 function rankWith(me, others, ctx, opts) {
   const received = (ctx && ctx.likes && ctx.likes.received) || {};
   const res = [];
   for (const other of others || []) {
-    if (!hardPass(me, other)) continue;
+    if (!hardPass(me, other, { relajarRelacion: !!opts.relajarRelacion })) continue;
     // Quien ya me dio like va en "Le gustas", no compite en el mazo.
     if (received[other.pubkey] && received[other.pubkey].tipo === '+') continue;
     if (ocultoPorVisto(me, other, ctx)) continue;
@@ -400,19 +557,29 @@ function rankWith(me, others, ctx, opts) {
   }
   res.sort((a, b) => b.total - a.total);
   res.relajado = !!opts.relajado;
+  res.nivel = opts.nivel || (opts.relajado ? 2 : 1);
   return res;
 }
 
 // Candidatos del mazo: filtros duros + factores blandos, ordenados
-// por score descendente. Si el pool queda por debajo de POOL_MIN, se
-// reintenta relajado (suelo 0.25, tolerancia de edad 10) y, solo si
-// la relajación realmente amplía el pool, el resultado se marca
-// `relajado` (propiedad del array y de cada candidato).
+// por score descendente. Tres niveles (propiedad `nivel` del array):
+//   1 normal      — pool ≥ POOL_MIN
+//   2 relajado    — suelo 0.25, tolerancia de edad 10
+//   3 mínimo      — pool < POOL_BAJO incluso relajado: suelo 0,
+//                   tolerancia 15 y la relación solo penaliza
+// Un nivel más laxo solo se adopta si realmente amplía el pool; entonces
+// el resultado se marca `relajado` (propiedad del array y de cada candidato).
 export function rankCandidates(me, others, ctx) {
-  const normal = rankWith(me, others, ctx, { floor: GATE_FLOOR, tol: TOL_EDAD, relajado: false });
+  const c = conModelo(ctx, others);
+  const normal = rankWith(me, others, c, { floor: GATE_FLOOR, tol: TOL_EDAD, relajado: false, nivel: 1 });
   if (normal.length >= POOL_MIN) return normal;
-  const relajado = rankWith(me, others, ctx, { floor: GATE_FLOOR_RELAXED, tol: TOL_EDAD_RELAXED, relajado: true });
-  return relajado.length > normal.length ? relajado : normal;
+  const relajado = rankWith(me, others, c, { floor: GATE_FLOOR_RELAXED, tol: TOL_EDAD_RELAXED, relajado: true, nivel: 2 });
+  const mejor = relajado.length > normal.length ? relajado : normal;
+  if (mejor.length >= POOL_BAJO) return mejor;
+  const minimo = rankWith(me, others, c, {
+    floor: 0, tol: TOL_EDAD_MINIMA, relajado: true, relajarRelacion: true, nivel: 3,
+  });
+  return minimo.length > mejor.length ? minimo : mejor;
 }
 
 // Los n mejores del día (por defecto 10).

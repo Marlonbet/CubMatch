@@ -1,0 +1,6 @@
+node_modules/
+# Clave PRIVADA de firma de actualizaciones: NUNCA a git (ver tools/gen-update-key.mjs)
+update-key.private.pem
+*.pem
+# Credenciales de TURN usadas en el build (TURNMD_INJECT)
+turn*.json

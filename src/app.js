@@ -692,12 +692,12 @@ const OB_STEPS = [
   // 1 Identidad
   () => {
     const d = S.borrador;
-    return field('Apodo', '<input data-f="apodo" value="' + esc(d.apodo) + '" placeholder="¿Cómo te dicen?" maxlength="30">') +
+    return field('Apodo', '<input data-f="apodo" type="text" value="' + esc(d.apodo) + '" placeholder="¿Cómo te dicen?" maxlength="30">') +
       field('Edad', '<input data-f="edad" type="number" min="18" max="99" value="' + esc(d.edad) + '" placeholder="18+">') +
       field('Género', selectHTML('genero', GENEROS, d.genero)) +
       field('Orientación', selectHTML('orientacion', ORIENTACIONES, d.orientacion)) +
       field('Provincia', selectHTML('provincia', PROVINCIAS, d.provincia)) +
-      field('Municipio', '<input data-f="municipio" value="' + esc(d.municipio) + '" placeholder="Ej: Palma Soriano">');
+      field('Municipio', '<input data-f="municipio" type="text" value="' + esc(d.municipio) + '" placeholder="Ej: Palma Soriano">');
   },
   // 2 Físico
   () => {
@@ -712,7 +712,7 @@ const OB_STEPS = [
   () => {
     const d = S.borrador;
     return field('Nivel de educación', selectHTML('educacion', EDUCACION, d.educacion)) +
-      field('Profesión / oficio', '<input data-f="profesion" value="' + esc(d.profesion) + '" placeholder="Ej: enfermera, mecánico…">') +
+      field('Profesión / oficio', '<input data-f="profesion" type="text" value="' + esc(d.profesion) + '" placeholder="Ej: enfermera, mecánico…">') +
       field('Sector', selectHTML('sector', SECTORES, d.sector));
   },
   // 4 Estilo de vida
@@ -722,7 +722,7 @@ const OB_STEPS = [
     return field('¿Fumas?', selectHTML('fumador', ['No', 'Ocasionalmente', 'Sí'], d.fumador)) +
       field('¿Bebes?', selectHTML('bebedor', ['No', 'Ocasionalmente', 'Sí'], d.bebedor)) +
       field('¿Haces deporte?', selectHTML('deporte', ['Sí', 'A veces', 'No'], d.deporte)) +
-      field('Religión / creencia', '<input data-f="religion" value="' + esc(d.religion) + '" placeholder="Opcional">') +
+      field('Religión / creencia', '<input data-f="religion" type="text" value="' + esc(d.religion) + '" placeholder="Opcional">') +
       field('¿Tienes hijos?', selectHTML('hijosTiene', ['No tengo', 'Tengo'], d.hijosTiene)) +
       field('¿Quieres hijos?', selectHTML('hijosQuiere', ['Sí', 'No', 'Tal vez'], d.hijosQuiere)) +
       field('¿Mascotas?', sino('mascotas', d.mascotas));
@@ -744,7 +744,7 @@ const OB_STEPS = [
     const d = S.borrador;
     return '<p class="fld-label">¿Qué te gusta? (elige varios)</p>' + chipsHTML('intereses', INTERESES, d.intereses) +
       field('Tags libres (separados por coma, máx ' + MAX_TAGS + ')',
-        '<input data-f="tags" data-split="1" value="' + esc((d.tags || []).join(', ')) + '" placeholder="Ej: café, malecón, trova">');
+        '<input data-f="tags" type="text" data-split="1" value="' + esc((d.tags || []).join(', ')) + '" placeholder="Ej: café, malecón, trova">');
   },
   // 7 Sobre ti
   () => {
@@ -753,13 +753,13 @@ const OB_STEPS = [
     for (let i = 0; i < 3; i++) {
       const pr = (d.prompts || [])[i] || { q: '', a: '' };
       prompts += '<div class="prompt-row">' + selectHTML('prompts.' + i + '.q', PROMPTS, pr.q, '— elige un prompt —') +
-        '<input data-f="prompts.' + i + '.a" value="' + esc(pr.a) + '" placeholder="Tu respuesta…"></div>';
+        '<input data-f="prompts.' + i + '.a" type="text" value="' + esc(pr.a) + '" placeholder="Tu respuesta…"></div>';
     }
     return field('Tu bio',
       '<textarea data-f="bio" rows="4" maxlength="' + MAX_BIO + '" placeholder="Cuéntale al mundo quién eres…">' + esc(d.bio) + '</textarea>' +
       '<small class="count" id="bio-count"></small>') +
       '<p class="fld-label">Prompts (opcional)</p>' + prompts +
-      field('Descríbete en 3 palabras', '<input data-f="tresPalabras" value="' + esc(d.tresPalabras) + '" placeholder="Ej: alegre, sincero, soñador">') +
+      field('Descríbete en 3 palabras', '<input data-f="tresPalabras" type="text" value="' + esc(d.tresPalabras) + '" placeholder="Ej: alegre, sincero, soñador">') +
       field('Foto (URL opcional)', '<input data-f="fotoURL" type="url" inputmode="url" value="' + esc(d.fotoURL) + '" placeholder="https://…">') +
       '<div class="foto-subida">' +
       '<img id="foto-preview" class="foto-preview" alt="Vista previa de tu foto" src="' + esc(d.fotoURL) + '"' + (d.fotoURL ? '' : ' hidden') + '>' +
