@@ -3,7 +3,7 @@
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
 import { nip04, getEventHash } from 'nostr-tools';
-import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido } from './red.js';
+import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido, KIND_DM } from './red.js';
 import {
   KIND_CALL, CallSession, buildCallPayload, parseCallPayload,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
@@ -18,7 +18,7 @@ import {
   buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf,
 } from './cuentas.js';
 import {
-  KIND_PERFIL,
+  KIND_PERFIL, KIND_LIKE, profileAddr, parseLikeEvent, integrarLikeEntrante,
   parsePerfilEvent, publishPerfil, fetchPerfiles,
   sendLike, sendDislike, fetchLikes, mutualMatches, sendReporte,
   publishIdentityDocs, migrarInboxSiDesactualizado, sendDMRouted, setInboxStore,
@@ -170,6 +170,7 @@ export function dispose() {
   stopChat();
   stopCalls();
   stopPresencia();
+  stopGlobalLive();
   setScreenScope(null);
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
@@ -547,7 +548,7 @@ async function enterApp(username, sk) {
   S.sk = sk;
   S.pubkey = id.pubkey;
   S.npub = id.npub;
-  if (S.pool) { try { S.pool.shutdown(); } catch {} }
+  if (S.pool) { try { stopGlobalLive(); } catch {} try { S.pool.shutdown(); } catch {} }
   S.pool = makePool(sk);
   S.chats = chatsLS();
   setScreenScope('discovery');
@@ -569,6 +570,7 @@ async function enterApp(username, sk) {
   showDeck();
   startCalls();
   startPresencia();
+  startGlobalLive();
   migrarInboxSiToca();
 }
 
@@ -597,6 +599,7 @@ async function restoreSession(ses) {
     showDeck();
     startCalls();
     startPresencia();
+    startGlobalLive();
     migrarInboxSiToca();
   } catch {
     LS.del('sesion');
@@ -2153,6 +2156,88 @@ function stopPresenciaUi() {
   if (presenciaUiTimer) { clearInterval(presenciaUiTimer); presenciaUiTimer = null; }
 }
 
+// ---------- 7c. listener global de DMs y likes (hallazgo M3) ----------
+// Antes: los DMs solo se escuchaban dentro del chat abierto y los likes
+// solo aparecían al re-descubrir. La sesión mantiene ahora una
+// suscripción en vivo por scope (DMs en messaging, likes en discovery;
+// discovery se adquiere por sesión igual que la señalización de
+// llamadas adquiere messaging):
+// - DM entrante → se fusiona en S.chats (dedup por id); si su chat no
+//   está abierto, avisa con toast y el badge "N nuevos" se actualiza.
+//   El receipt sigue enviándose solo al abrir el chat (semántica C2).
+// - Like entrante (firma verificada, C1) → se integra en S.data.likes;
+//   si crea un match mutuo nuevo, avisa y refresca la pantalla visible.
+let globalLiveSubs = [];
+let globalLiveScopes = [];
+let globalLivePool = null; // el pool sobre el que se adquirieron los scopes
+
+function startGlobalLive() {
+  if (!S.pool || !S.sk) return;
+  stopGlobalLive(); // re-entrada (re-login): suelta la sesión anterior
+  globalLivePool = S.pool;
+  for (const scope of ['messaging', 'discovery']) {
+    S.pool.acquire(scope);
+    globalLiveScopes.push(scope);
+  }
+  const since = Math.floor(Date.now() / 1000);
+  globalLiveSubs.push(S.pool.messaging().subscribe(
+    [{ kinds: [KIND_DM], '#p': [S.pubkey], since }],
+    (ev) => { void onGlobalDM(ev); }
+  ));
+  globalLiveSubs.push(S.pool.discovery().subscribe(
+    [{ kinds: [KIND_LIKE], '#a': [profileAddr(S.pubkey)], since }],
+    (ev) => { void onGlobalLike(ev); }
+  ));
+}
+
+function stopGlobalLive() {
+  for (const sub of globalLiveSubs) { try { sub.unsub(); } catch {} }
+  globalLiveSubs = [];
+  // Los scopes se liberan sobre el pool que los adquirió (puede no ser
+  // el actual tras un restablecimiento de relays).
+  const pool = globalLivePool;
+  globalLivePool = null;
+  for (const scope of globalLiveScopes) { try { if (pool) pool.release(scope); } catch {} }
+  globalLiveScopes = [];
+}
+
+function nombreCorto(peerPubkey) {
+  const entry = S.perfilCache.get(peerPubkey);
+  const apodo = entry && entry.profile && entry.profile.apodo;
+  return apodo || (peerPubkey.slice(0, 8) + '…');
+}
+
+async function onGlobalDM(ev) {
+  const r = await dmToMsg(ev); // firma (C1) + descifrado; null si no vale
+  if (!r) return;
+  pushMsg(r.peer, r.msg); // dedup por id: si el chat está abierto, él lo pinta
+  if (r.msg.from !== 'peer') return;
+  if (S.screen === 'chat' && S.chatPeer === r.peer) return; // el chat ya lo muestra
+  toast('💬 Nuevo mensaje de ' + nombreCorto(r.peer));
+  if (S.screen === 'matches') { try { await loadMatches(); } catch {} }
+}
+
+function onGlobalLike(ev) {
+  if (!ev || typeof ev.id !== 'string') return;
+  if (!firmaOK(ev, 'like')) return; // C1: sin firma válida no existe
+  const like = parseLikeEvent(ev, S.pubkey);
+  if (!like || like.from === S.pubkey) return; // solo recibidos
+  if (S.bloqueados.includes(like.peer)) return;
+  const likes = (S.data && S.data.likes) || LS.get(LS_LIKES, { sent: {}, received: {} });
+  const res = integrarLikeEntrante(likes, like);
+  if (!res.changed) return;
+  LS.set(LS_LIKES, likes);
+  if (res.nuevoMatch) {
+    toast('💘 ¡Nuevo match con ' + nombreCorto(like.peer) + '!');
+    refreshPresenciaSub(); // el nuevo match entra a los beacons
+  }
+  if (S.screen === 'matches') { loadMatches().catch(() => {}); }
+  else if (S.screen === 'deck' && S.data) {
+    S.leGustas = likesYou(S.data.me, S.data.others, S.data.ctx);
+    renderLeGustas();
+  }
+}
+
 // ---------- 7b. llamadas de voz y video (v1.7.0) ----------
 // WebRTC entre matches con señalización Nostr efímera (kind 21004,
 // cifrada NIP-04). La suscripción vive lo que dura la sesión (no una
@@ -2655,6 +2740,7 @@ function restablecerRelays() {
     setScreenScope('both');
     startCalls();
     startPresencia();
+    startGlobalLive();
   }
   toast('Relays restablecidos. Reconectando…');
   showAjustes();
@@ -2884,7 +2970,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: () => usoRelevoReg(), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: () => usoRelevoReg(), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S, onGlobalDM, onGlobalLike, startGlobalLive, stopGlobalLive, nombreCorto };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

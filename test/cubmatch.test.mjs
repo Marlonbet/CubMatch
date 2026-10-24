@@ -10,7 +10,7 @@ import {
   buildRelayListEvent, parseRelayListEvent,
   buildDMInboxEvent, parseDMInboxEvent, inboxDesactualizado, migrarInboxSiDesactualizado,
   publishIdentityDocs,
-  mergePerfiles, mergeLikes,
+  mergePerfiles, mergeLikes, integrarLikeEntrante,
 } from '../src/cubmatch.js';
 import { RELAYS, ALL_RELAYS } from '../src/red.js';
 import { newProfile } from '../src/perfil.js';
@@ -226,4 +226,63 @@ test('reporte NIP-56: build → parse', () => {
   assert.equal(parsed.motivo, 'perfil falso');
   assert.equal(parsed.reporter, PK_A);
   assert.equal(parseReporteEvent({ kind: 1, tags: [], content: '{}' }), null);
+});
+
+test('integrarLikeEntrante: like nuevo se integra y detecta el match', () => {
+  const likes = { sent: { [PK_B]: { tipo: '+', ts: 100 } }, received: {} };
+  const like = { peer: PK_B, tipo: '+', superlike: false, created_at: 200 };
+  const r = integrarLikeEntrante(likes, like);
+  assert.equal(r.changed, true);
+  assert.equal(r.nuevoMatch, true, 'yo le di + y ahora me da + → match nuevo');
+  assert.equal(likes.received[PK_B].tipo, '+');
+  assert.equal(likes.received[PK_B].ts, 200);
+});
+
+test('integrarLikeEntrante: like más viejo no pisa al nuevo', () => {
+  const likes = { sent: {}, received: { [PK_B]: { tipo: '+', ts: 300 } } };
+  const r = integrarLikeEntrante(likes, { peer: PK_B, tipo: '-', created_at: 100 });
+  assert.equal(r.changed, false);
+  assert.equal(r.nuevoMatch, false);
+  assert.equal(likes.received[PK_B].tipo, '+');
+});
+
+test('integrarLikeEntrante: el más nuevo reemplaza (match ya existía → no re-avisa)', () => {
+  const likes = {
+    sent: { [PK_B]: { tipo: '+', ts: 100 } },
+    received: { [PK_B]: { tipo: '+', ts: 150 } },
+  };
+  const r = integrarLikeEntrante(likes, { peer: PK_B, tipo: '+', created_at: 400 });
+  assert.equal(r.changed, true);
+  assert.equal(r.nuevoMatch, false, 'ya era mutuo: no es un match NUEVO');
+  assert.equal(likes.received[PK_B].ts, 400);
+});
+
+test('integrarLikeEntrante: dislike recibido no crea match', () => {
+  const likes = { sent: { [PK_B]: { tipo: '+', ts: 100 } }, received: {} };
+  const r = integrarLikeEntrante(likes, { peer: PK_B, tipo: '-', created_at: 200 });
+  assert.equal(r.changed, true);
+  assert.equal(r.nuevoMatch, false);
+  assert.equal(likes.received[PK_B].tipo, '-');
+});
+
+test('integrarLikeEntrante: like sin "+" mío no es match', () => {
+  const likes = { sent: { [PK_B]: { tipo: '-', ts: 100 } }, received: {} };
+  const r = integrarLikeEntrante(likes, { peer: PK_B, tipo: '+', created_at: 200 });
+  assert.equal(r.changed, true);
+  assert.equal(r.nuevoMatch, false, 'yo le di - → aunque me dé +, no hay match');
+});
+
+test('integrarLikeEntrante: entradas inválidas no rompen nada', () => {
+  assert.deepEqual(integrarLikeEntrante(null, { peer: PK_B }), { changed: false, nuevoMatch: false });
+  assert.deepEqual(integrarLikeEntrante({}, null), { changed: false, nuevoMatch: false });
+  const likes = { sent: {}, received: {} };
+  assert.deepEqual(integrarLikeEntrante(likes, { tipo: '+' }), { changed: false, nuevoMatch: false });
+  assert.deepEqual(likes.received, {}, 'sin peer válido no se toca received');
+});
+
+test('integrarLikeEntrante: crea received si no existía', () => {
+  const likes = { sent: {} };
+  const r = integrarLikeEntrante(likes, { peer: PK_B, tipo: '+', superlike: true, created_at: 10 });
+  assert.equal(r.changed, true);
+  assert.equal(likes.received[PK_B].superlike, true);
 });

@@ -228,6 +228,25 @@ export function mutualMatches(sent, received) {
   );
 }
 
+// Integra un like ENTRANTE ya verificado (la firma la comprueba el
+// llamador) en el mapa {sent, received} de la sesión. Por contraparte
+// gana el ts más nuevo. Devuelve { changed, nuevoMatch }: nuevoMatch es
+// true solo si este like CREA un match mutuo que antes no existía.
+export function integrarLikeEntrante(likes, like) {
+  const res = { changed: false, nuevoMatch: false };
+  if (!likes || !like || typeof like.peer !== 'string') return res;
+  likes.received = likes.received || {};
+  const prev = likes.received[like.peer];
+  const ts = Number(like.created_at) || 0;
+  if (prev && (Number(prev.ts) || 0) >= ts) return res;
+  const yoLeDiMas = likes.sent && likes.sent[like.peer] && likes.sent[like.peer].tipo === '+';
+  const eraMutuo = !!prev && prev.tipo === '+' && yoLeDiMas;
+  likes.received[like.peer] = { tipo: like.tipo, superlike: !!like.superlike, ts };
+  res.changed = true;
+  if (!eraMutuo && like.tipo === '+' && yoLeDiMas) res.nuevoMatch = true;
+  return res;
+}
+
 // ---- Listas de relays (NIP-65) e inbox de DMs (NIP-17) ----
 function cleanRelayList(relays) {
   return [...new Set((relays || []).filter(
