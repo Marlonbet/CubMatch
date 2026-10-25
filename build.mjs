@@ -39,7 +39,7 @@ if (updatePub && !(updatePub.kty === 'EC' && updatePub.crv === 'P-256' && update
 
 // Un solo bundle: sirve como fallback incluido y como live remoto.
 const result = buildSync({
-  entryPoints: [join(src, 'app.js')],
+  entryPoints: [join(src, 'entry.js')],
   bundle: true,
   minify: true,
   format: 'iife',
