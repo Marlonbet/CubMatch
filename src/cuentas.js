@@ -10,7 +10,7 @@
 // Si la olvidas, la identidad se pierde.
 // (Patrón heredado de Espectro; reclamo en kind 30078 con d="cubmatch:perfil:<usuario>".)
 //
-// Seguridad (revisión 2026-10; resto de M4 cerrado en v1.11.2):
+// Seguridad (revisión 2026-10; resto de M4 cerrado en v1.11.2, M5 en v1.11.3):
 //  · El created_at de un reclamo lo elige quien lo publica, así que NO es
 //    una prueba de "quién llegó primero". Antes, publicar un reclamo con
 //    created_at=1 dejaba fuera de su propia cuenta al dueño legítimo. Ahora
@@ -19,6 +19,16 @@
 //    nombre como ocupado si algún reclamante está corroborado
 //    (nombreOcupado): un reclamo pelado con created_at=1 ya no "ocupa"
 //    el nombre por adelantado.
+//  · M5 — carrera de registro simultáneo: en Nostr no hay un registro
+//    atómico de nombres, así que dos registros a la vez NO se pueden
+//    impedir: ambos publican reclamo + documentos y ambos creerían que
+//    el nombre es suyo. Lo que sí se puede arreglar es el silencio:
+//    tras registrar, la app vuelve a consultar los reclamos y, si OTRO
+//    reclamante también está corroborado, avisa (nombreEnDisputa). El
+//    último en publicar es el que ve el aviso; el primero lo verá al
+//    entrar de nuevo. El aviso persiste en local hasta que un chequeo
+//    nuevo diga lo contrario, porque un nombre en disputa lo sigue
+//    estando: los reclamos no se borran.
 //  · La clave sale de una contraseña y la pubkey y el salt son públicos, así
 //    que cualquiera puede probar contraseñas OFFLINE contra un perfil. Mitigación:
 //    contraseñas nuevas más largas (validateNewPassword) y scrypt más caro
@@ -151,27 +161,16 @@ export function parseClaimEvent(ev) {
   return { username: body.username, pubkey: ev.pubkey, created_at: ev.created_at, id: ev.id };
 }
 
-// ¿Algún reclamo de este nombre está corroborado? Un reclamo "pelado"
-// (solo el evento 30078, sin nada más del mismo pubkey) NO ocupa el
-// nombre: cualquiera puede publicar un reclamo válido con created_at=1
-// para "ocupar" nombres por adelantado (M4, resto tras la v1.11.0: el
-// login ya no se bloquea, pero el registro sí se bloqueaba con cualquier
-// reclamo). El flujo real de registro publica junto al reclamo los
-// documentos de identidad (10002/10050), y al completar el perfil el
-// 30079: si ALGÚN reclamante tiene alguno de esos eventos con firma
-// válida, el nombre está ocupado. Se revisan TODOS los reclamos, no solo
-// el "ganador" por created_at: un squatter con created_at=1 ganaría ese
-// orden pero no la corroboración. Un nombre sin corroborar puede
-// registrarse: el nuevo registro publica reclamo + documentos y pasa a
-// ser el ocupante corroborado; el login del reclamante anterior (si lo
-// era) sigue funcionando vía verifyCredentials.
-export async function nombreOcupado(pool, claim) {
-  if (!claim) return false;
+// Reclamantes corroborados del nombre: pubkeys de TODOS los reclamos
+// vistos que además tienen un 10002/10050 o un perfil 30079 con firma
+// válida. Un reclamo pelado no corrobora a nadie (M4).
+export async function pubkeysCorroborados(pool, claim) {
+  if (!claim) return new Set();
   const pubkeys = [...new Set(
     [claim.pubkey, ...((claim.todos || []).map((c) => c && c.pubkey))]
       .filter((p) => typeof p === 'string' && p)
   )];
-  if (!pubkeys.length) return false;
+  if (!pubkeys.length) return new Set();
   const corroborados = new Set();
   const run = (client) => new Promise((resolve) => {
     const sub = client.subscribe(
@@ -191,7 +190,25 @@ export async function nombreOcupado(pool, claim) {
   });
   await run(pool.discovery());
   if (!corroborados.size && pool.scopeDegraded('discovery')) await run(pool.messaging());
-  return corroborados.size > 0;
+  return corroborados;
+}
+
+export async function nombreOcupado(pool, claim) {
+  return (await pubkeysCorroborados(pool, claim)).size > 0;
+}
+
+// ¿El nombre está en disputa para mí (M5)? True si ALGÚN reclamante
+// corroborado tiene un pubkey distinto del mío: otra cuenta completó el
+// registro del mismo nombre. Mi propia corroboración no cuenta (si no,
+// todo registro se marcaría en disputa a sí mismo), y que yo aún no
+// tenga documentos no me salva: si el otro sí los tiene, yo perdí.
+// Best-effort por diseño: si los relays no devuelven aún los
+// documentos del rival, este chequeo no los ve — por eso se repite en
+// cada login, no solo tras el registro.
+export async function nombreEnDisputa(pool, claim, miPubkey) {
+  if (!claim || !miPubkey) return false;
+  const corroborados = await pubkeysCorroborados(pool, claim);
+  return [...corroborados].some((p) => p !== miPubkey);
 }
 
 // De varios reclamos del mismo usuario, el de created_at más bajo. OJO: ese

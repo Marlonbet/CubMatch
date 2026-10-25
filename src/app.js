@@ -15,7 +15,7 @@ import {
 } from './ux.js';
 import {
   normalizeUsername, validatePassword, deriveSecretKey,
-  buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf, nombreOcupado,
+  buildClaimEvent, fetchUsernameClaim, verifyCredentials, nsecOf, nombreOcupado, nombreEnDisputa,
 } from './cuentas.js';
 import {
   KIND_PERFIL, KIND_LIKE, profileAddr, parseLikeEvent, integrarLikeEntrante,
@@ -106,6 +106,7 @@ const S = {
   chatPeer: null, chatSubs: [],
   stickerEdit: false,    // panel de stickers en modo edición (borrar)
   cuentaModo: 'registro',
+  nombreEnDisputa: false, // M5: otro reclamante corroborado del mismo usuario
   infoFrom: 'inicio',
   timers: [],
   screen: 'inicio',
@@ -478,6 +479,20 @@ function cuentaError(msg) {
   box.textContent = msg;
 }
 
+// M5: marca (o limpia) el aviso de nombre en disputa. Nunca lanza:
+// un fallo de red aquí no puede bloquear la entrada a la cuenta. El
+// aviso persiste en local (clave 'nombreEnDisputa') hasta que un
+// chequeo nuevo diga lo contrario, porque la disputa no se resuelve
+// sola: los reclamos publicados no se borran.
+async function verificarDisputaNombre(pool, claim, miPubkey, username) {
+  let disputa = false;
+  try { disputa = claim ? await nombreEnDisputa(pool, claim, miPubkey) : false; }
+  catch (e) { console.warn('[cubmatch] chequeo de disputa M5 falló', e); }
+  S.nombreEnDisputa = disputa;
+  if (disputa) LS.set('nombreEnDisputa', { username, fecha: Date.now() });
+  else LS.del('nombreEnDisputa');
+}
+
 async function submitCuenta() {
   const form = $('#cuenta-form');
   const btn = $('#cuenta-btn');
@@ -522,11 +537,23 @@ async function submitCuenta() {
           await publishIdentityDocs(tmp);
           try { LS.set(LS_MI_INBOX, RELAYS.messaging.slice()); } catch {}
         } catch (e) { console.warn('[cubmatch] 10002/10050 no publicados', e); }
+        // M5: re-verificación tras publicar. Si alguien registró el
+        // mismo nombre a la vez, sus documentos ya estarán en los
+        // relays y el aviso queda marcado (no se bloquea la entrada:
+        // la cuenta funciona; lo que se corrige es creer en silencio
+        // que el nombre es solo mío).
+        try {
+          const nuevo = await fetchUsernameClaim(tmp, username);
+          await verificarDisputaNombre(tmp, nuevo, importIdentity(nsecOf(sk)).pubkey, username);
+        } catch (e) { console.warn('[cubmatch] re-chequeo M5 falló', e); }
       } else {
         const { pubkey } = importIdentity(nsecOf(sk));
         if (!verifyCredentials(pubkey, claim)) {
           throw new Error('Usuario o contraseña incorrectos.');
         }
+        // M5: al entrar de nuevo se repite el chequeo — el primero en
+        // registrar se entera aquí de que otro completó el mismo nombre.
+        await verificarDisputaNombre(tmp, claim, pubkey, username);
       }
     } finally {
       tmp.shutdown();
@@ -583,6 +610,9 @@ async function restoreSession(ses) {
     S.sk = id.sk;
     S.pubkey = id.pubkey;
     S.npub = id.npub;
+    // M5: el aviso sobrevive al reinicio; solo vale para este usuario.
+    const disp = LS.get('nombreEnDisputa', null);
+    S.nombreEnDisputa = !!(disp && disp.username === ses.username);
     S.pool = makePool(id.sk);
     S.chats = chatsLS();
     setScreenScope('discovery');
@@ -1053,10 +1083,24 @@ function showDeck() {
   }
   $('#app').innerHTML = pantallaShell('deck',
     '<div class="deck-head"><div class="deck-title">' + logoSVG(30, 'deck') + '<div><h2>Descubrir</h2><p class="muted" id="deck-sub">Buscando perfiles…</p></div></div></div>' +
-    '<div id="deck-aviso">' + avisoMatchingHTML() + '</div>' +
+    '<div id="deck-aviso">' + avisoDisputaHTML() + avisoMatchingHTML() + '</div>' +
     '<div id="deck-legustas"></div>' +
     '<div id="deck-body">' + cargandoHTML('Conectando a los relays…') + '</div>');
   loadDeck();
+}
+
+// Aviso de nombre en disputa (M5) en Descubrir: otra cuenta completó
+// el registro del mismo usuario al mismo tiempo. La cuenta funciona,
+// pero buscar el nombre puede mostrar el otro perfil.
+function avisoDisputaHTML() {
+  const disp = S.nombreEnDisputa || (() => {
+    const d = LS.get('nombreEnDisputa', null);
+    return !!(d && d.username === S.username);
+  })();
+  if (!disp) return '';
+  return '<p class="deck-aviso">⚠️ Este usuario está en disputa: otra cuenta también lo registró al mismo tiempo. ' +
+    'Tu cuenta funciona, pero al buscar «' + esc(S.username) + '» puede aparecer el otro perfil. ' +
+    'Si quieres un nombre solo tuyo, cierra sesión y crea otra cuenta con un nombre distinto.</p>';
 }
 
 // Aviso de matching en Descubrir (v1.10.0): UNA sola línea discreta
@@ -2727,6 +2771,8 @@ function cerrarSesion() {
   try { if (S.pool) S.pool.shutdown(); } catch {}
   S.pool = null;
   LS.del('sesion');
+  LS.del('nombreEnDisputa'); // M5: al volver a entrar, el login re-chequea
+  S.nombreEnDisputa = false;
   showInicio();
 }
 
