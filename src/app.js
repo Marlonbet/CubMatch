@@ -31,8 +31,9 @@ import {
   PROMPTS, MAX_BIO, MAX_TAGS,
 } from './perfil.js';
 import {
-  TEXTO_LIMITE_EXPL, TEXTO_LIMITE_AVISO, TEXTO_LIMITE_CORTE,
-  GRACIA_LIMITE_MS, conUso, agotado, textoRestante,
+  TEXTO_LIMITE_EXPL,
+  GRACIA_LIMITE_MS, conUso, agotado, limiteParaMedia,
+  avisoLimite, corteLimite, textoRestanteMedia,
 } from './tiempollamadas.js';
 import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel } from './matching.js';
 import { preparePhotoBlob, uploadPhoto } from './foto.js';
@@ -2540,20 +2541,27 @@ function showCallOverlay(modo, peer, media) {
   callAttachStreams();
 }
 
-// ---------- presupuesto de llamadas por relevo (v1.10.0) ----------
+// ---------- presupuesto de llamadas por relevo (v1.10.0,
+// diferenciado voz/video desde v1.12.1) ----------
 // La cubeta mensual vive en localStorage POR CUENTA (pubkey) y por
 // mes (la clave de mes y la aritmética son de tiempollamadas.js).
 // Solo descuenta el tiempo en que la llamada conectada va por
 // relevo: la CallSession lo reporta con eventos 'relevo'.
-function usoRelevoKey() { return S.pubkey ? 'uso_relevo:' + S.pubkey : null; }
-function usoRelevoReg() {
-  const k = usoRelevoKey();
+// DOS cubetas: la llave vieja sin medio ES la de voz (así nadie
+// pierde su saldo al actualizar) y el video tiene llave propia y
+// empieza de cero. Gastar una no toca la otra.
+function usoRelevoKey(media) {
+  if (!S.pubkey) return null;
+  return media === 'video' ? 'uso_relevo_video:' + S.pubkey : 'uso_relevo:' + S.pubkey;
+}
+function usoRelevoReg(media) {
+  const k = usoRelevoKey(media);
   return k ? LS.get(k, null) : null;
 }
-function usoRelevoSumar(deltaMs) {
-  const k = usoRelevoKey();
-  if (!k || !(deltaMs > 0)) return usoRelevoReg();
-  const reg = conUso(usoRelevoReg(), deltaMs, Date.now());
+function usoRelevoSumar(deltaMs, media) {
+  const k = usoRelevoKey(media);
+  if (!k || !(deltaMs > 0)) return usoRelevoReg(media);
+  const reg = conUso(usoRelevoReg(media), deltaMs, Date.now());
   LS.set(k, reg);
   return reg;
 }
@@ -2562,10 +2570,10 @@ function usoRelevoSumar(deltaMs) {
 // GRACIA_LIMITE_MS si la llamada sigue viva.
 let limiteGracia = null; // {id, timer}
 function gestionarRelevo(e) {
-  const reg = usoRelevoSumar(e.deltaMs);
-  if (!agotado(reg, Date.now())) return;
+  const reg = usoRelevoSumar(e.deltaMs, e.media);
+  if (!agotado(reg, Date.now(), limiteParaMedia(e.media))) return;
   if (limiteGracia && limiteGracia.id === e.id) return; // ya avisado en esta llamada
-  toast(TEXTO_LIMITE_AVISO, 6000);
+  toast(avisoLimite(e.media), 6000);
   const id = e.id;
   const timer = setTimeout(() => {
     limiteGracia = null;
@@ -2611,7 +2619,7 @@ function onCallEvent(e) {
         break;
       case 'limite':
         registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
-        toast(TEXTO_LIMITE_CORTE, 9000);
+        toast(corteLimite(e.media), 9000);
         break;
       case 'perdida':
         registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'perdida' }));
@@ -2670,7 +2678,8 @@ function showAjustes() {
     '<section class="aj-sec"><h3>Llamadas</h3>' +
     '<p class="muted small">Con tus matches puedes hablar por <b>voz</b> desde el primer mensaje. El <b>video</b> pide tres acuerdos: haber conversado ya (10+ mensajes en el chat), que actives esta opción y que aceptes cada videollamada cuando suene.</p>' +
     '<label class="check"><input type="checkbox" id="aj-videook"' + (S.miPerfil && S.miPerfil.videoOk ? ' checked' : '') + '> Acepto videollamadas <small class="muted">(tu preferencia viaja en tu perfil publicado, para que quien te llame la pueda ver)</small></label>' +
-    '<p class="small" style="margin-top:12px"><b>' + esc(textoRestante(usoRelevoReg(), Date.now())) + '</b></p>' +
+    '<p class="small" style="margin-top:12px"><b>' + esc(textoRestanteMedia(usoRelevoReg('audio'), Date.now(), 'audio')) + '</b></p>' +
+    '<p class="small"><b>' + esc(textoRestanteMedia(usoRelevoReg('video'), Date.now(), 'video')) + '</b></p>' +
     '<p class="muted small">' + TEXTO_LIMITE_EXPL + '</p>' +
     '</section>' +
     '<section class="aj-sec"><h3>Compartir</h3>' +
@@ -3018,7 +3027,7 @@ function onAppClick(e) {
 const VERSION = '__APP_VERSION__';
 window.__cubmatchApp = { boot, dispose, version: VERSION };
 // Ganchos solo para tests (no usar en producción).
-window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: () => usoRelevoReg(), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S, onGlobalDM, onGlobalLike, startGlobalLive, stopGlobalLive, nombreCorto };
+window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: (media) => usoRelevoReg(media), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S, onGlobalDM, onGlobalLike, startGlobalLive, stopGlobalLive, nombreCorto };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
 if (typeof document !== 'undefined') {

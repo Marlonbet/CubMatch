@@ -80,7 +80,8 @@ test('textos del límite: lenguaje simple, sin jerga técnica', () => {
   for (const t of [TEXTO_LIMITE_EXPL, TEXTO_LIMITE_AVISO, TEXTO_LIMITE_CORTE]) {
     assert.ok(!/TURN|CGNAT|\bICE\b|STUN/.test(t), 'sin jerga: ' + t);
   }
-  assert.match(TEXTO_LIMITE_EXPL, /20 minutos al mes/);
+  assert.match(TEXTO_LIMITE_EXPL, /20 minutos de voz/);
+  assert.match(TEXTO_LIMITE_EXPL, /5 minutos de videollamadas/);
   assert.match(TEXTO_LIMITE_EXPL, /se renueva el día 1/);
   assert.match(TEXTO_LIMITE_EXPL, /WiFi/);
   assert.match(TEXTO_LIMITE_CORTE, /se renuevan el día 1/);
@@ -422,7 +423,21 @@ test('relevo en la app: los eventos suman a la cubeta del mes y al agotarse avis
   assert.match(document.body.textContent, /Ya usaste tus 20 minutos de llamadas de este mes/, 'aviso de gracia visible');
   // Ajustes → Llamadas muestra el restante (cero) y la explicación sencilla
   T.showAjustes();
-  assert.match(document.body.textContent, /Ya no te quedan minutos de llamadas este mes/);
+  assert.match(document.body.textContent, /Ya no te quedan minutos de llamadas de voz este mes/);
+  assert.match(document.body.textContent, /Te quedan 5 min de videollamadas este mes/, 'la cubeta de video no se tocó al gastar la de voz');
   assert.ok(document.body.textContent.includes('servicio de relevo gratuito'), 'explicación del límite visible');
+  // v1.12.1: el video descuenta de SU cubeta (5 min), sin tocar la de voz
+  localStorage.removeItem('cubmatch_uso_relevo_video:' + pkU);
+  assert.equal(T.getUsoRelevo('video'), null);
+  T.onCallEvent({ tipo: 'relevo', id: 'call-prueba-video', media: 'video', deltaMs: 4 * 60000 });
+  let regV = T.getUsoRelevo('video');
+  assert.equal(regV.ms, 4 * 60000);
+  assert.equal(T.getUsoRelevo('audio').ms, LIMITE_RELEVO_MS, 'la voz sigue en su saldo, no en el del video');
+  T.onCallEvent({ tipo: 'relevo', id: 'call-prueba-video', media: 'video', deltaMs: 1 * 60000 });
+  assert.equal(T.getUsoRelevo('video').ms, 5 * 60000, 'cubeta de video llena: 5 minutos');
+  await wait(30);
+  assert.match(document.body.textContent, /Ya usaste tus 5 minutos de videollamadas de este mes/, 'aviso de gracia de video visible');
+  T.showAjustes();
+  assert.match(document.body.textContent, /Ya no te quedan minutos de videollamadas este mes/);
   window.__cubmatchApp.dispose(); // limpia el temporizador de gracia
 });
