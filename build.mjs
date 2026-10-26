@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { firmarLive, publicJwkDePem, verificarLive } from './tools/firma.mjs';
+import { minificarCss } from './tools/mincss.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const src = join(root, 'src');
@@ -110,7 +111,10 @@ if (!updatePub) {
 }
 
 // Archivo único descargable
-const css = readFileSync(join(src, 'styles.css'), 'utf8');
+// El CSS se minifica (ver tools/mincss.mjs): el archivo único se
+// comparte por WhatsApp y se descarga con datos caros, así que cada
+// KB cuenta; el CSS fuente queda legible en src/styles.css.
+const css = minificarCss(readFileSync(join(src, 'styles.css'), 'utf8'));
 let html = readFileSync(join(src, 'index.html'), 'utf8');
 // Función de reemplazo (no string): evita que `$&` del bundle corrompa el HTML.
 html = html.replace('<!--__STYLES__-->', () => `<style>${css}</style>`);
