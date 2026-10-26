@@ -16,5 +16,5 @@
     "test": "node --test \"test/*.test.mjs\""
   },
   "type": "module",
-  "version": "1.12.2"
+  "version": "1.12.3"
 }

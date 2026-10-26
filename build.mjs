@@ -13,7 +13,7 @@
 //   UPDATE_SIGNING_KEY=update-key.private.pem npm run build
 // Sin UPDATE_SIGNING_KEY el build funciona, pero NO genera la firma: los
 // clientes con verificación ignorarán esa versión viva.
-import { buildSync } from 'esbuild';
+import { buildSync, transformSync } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -109,6 +109,12 @@ bootJs = bootJs.replace('__UPDATE_PUBKEY__', () => (updatePub
 if (!updatePub) {
   console.warn('AVISO: no hay update-key.pub.json → este build sale con la auto-actualización DESACTIVADA.');
 }
+
+// El boot también se minifica (v1.12.3, punto 4: ligereza de datos):
+// iba tal cual con comentarios (~6,9 KB) y con esbuild baja a ~3,3 KB.
+// Se minifica DESPUÉS de sustituir los placeholders, para que la
+// versión y la clave pública queden dentro del código minificado.
+bootJs = transformSync(bootJs, { minify: true }).code;
 
 // Archivo único descargable
 // El CSS se minifica (ver tools/mincss.mjs): el archivo único se
