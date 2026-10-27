@@ -36,7 +36,8 @@
 //    El login debe usar resolverCuenta() para seguir aceptando cuentas v1.
 
 import { scryptAsync } from '@noble/hashes/scrypt.js';
-import { getPublicKey, nip19 } from 'nostr-tools';
+import { getPublicKey } from 'nostr-tools/pure';
+import * as nip19 from 'nostr-tools/nip19';
 import { eventoValido } from './red.js';
 import { KIND_PERFIL, KIND_RELAY_LIST, KIND_DM_INBOX, TAG_D } from './cubmatch.js';
 

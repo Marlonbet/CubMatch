@@ -2,7 +2,8 @@
 // Vanilla JS, todo renderizado en #app con template strings.
 // Sin dependencias de Node: solo los 5 módulos + WebSocket global del navegador.
 
-import { nip04, getEventHash } from 'nostr-tools';
+import { getEventHash } from 'nostr-tools/pure';
+import * as nip04 from 'nostr-tools/nip04';
 import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido, KIND_DM } from './red.js';
 import {
   KIND_CALL, CallSession, buildCallPayload, parseCallPayload,

@@ -7,9 +7,9 @@ import {
   finalizeEvent,
   verifyEvent,
   verifiedSymbol,
-  nip19,
-  nip04,
-} from 'nostr-tools';
+} from 'nostr-tools/pure';
+import * as nip19 from 'nostr-tools/nip19';
+import * as nip04 from 'nostr-tools/nip04';
 
 export const KIND_DM = 4;          // mensaje directo (NIP-04, cifrado)
 export const KIND_PROFILE = 0;     // perfil: {name}

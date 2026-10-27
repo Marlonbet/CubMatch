@@ -15,7 +15,7 @@
 // el archivo original tal cual: la función nunca rompe el editor.
 
 import { sha256 } from '@noble/hashes/sha2.js';
-import { finalizeEvent } from 'nostr-tools';
+import { finalizeEvent } from 'nostr-tools/pure';
 
 // Servidores Blossom, en orden de preferencia. El que responde primero
 // es el primario; el resto reciben copia espejo (best-effort).
