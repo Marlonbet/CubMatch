@@ -132,6 +132,12 @@ function toast(msg, ms) {
   S.timers.push(t);
 }
 
+// Aviso único de falta de conexión (v1.12.8, punto 4: ligereza): el
+// mismo toast vivía copiado en 10 catch de app.js; una sola definición.
+function avisoSinConexion() {
+  toast('Sin conexión a los relays. Intenta de nuevo.');
+}
+
 // ---------- pool de relays (lazy: sin auto-conexión) ----------
 function makePool(sk) {
   return new RelayPool({
@@ -597,6 +603,28 @@ async function submitCuenta() {
   }
 }
 
+// El perfil propio tras entrar o restaurar sesión (v1.12.8, punto 4:
+// ligereza): enterApp y restoreSession traían copiado el mismo bloque.
+// Con perfil publicado se sincroniza el borrador local sin perder
+// ediciones sin publicar (ver fusionarBorrador); sin perfil (o sin red
+// para leerlo) se entra con el borrador local y NUNCA se abre solo el
+// asistente de completar perfil (v1.10.0). Una sola definición, mismo
+// comportamiento en los dos caminos.
+function aplicarMiPerfil(mine) {
+  if (mine && mine.profile) {
+    S.miPerfil = mine.profile;
+    S.perfilPublicado = true;
+    // El borrador local se sincroniza con lo publicado sin perder
+    // ediciones sin publicar: así el editor y la 🔔 nunca muestran un
+    // perfil vacío cuando en la red sí hay uno.
+    try { LS.set('perfil', fusionarBorrador(mine.profile, LS.get('perfil', null))); } catch {}
+  } else {
+    S.borrador = LS.get('perfil', null) || newProfile();
+    S.miPerfil = S.borrador;
+    S.perfilPublicado = false;
+  }
+}
+
 async function enterApp(username, sk) {
   const seq = typeof window !== 'undefined' ? (window.__cubmatchBootSeq || 0) : 0;
   const id = importIdentity(nsecOf(sk));
@@ -613,22 +641,7 @@ async function enterApp(username, sk) {
   let mine = null;
   try { mine = await fetchMiPerfilConReintento(); } catch {}
   if (bootEsObsoleto(seq)) { abortarBootObsoleto(); return; }
-  if (mine && mine.profile) {
-    S.miPerfil = mine.profile;
-    S.perfilPublicado = true;
-    // El borrador local se sincroniza con lo publicado sin perder
-    // ediciones sin publicar (ver fusionarBorrador): así el editor y
-    // la 🔔 nunca muestran un perfil vacío cuando en la red sí hay uno.
-    try { LS.set('perfil', fusionarBorrador(mine.profile, LS.get('perfil', null))); } catch {}
-  } else {
-    // Sin perfil publicado (o sin red para leerlo): NUNCA se abre
-    // solo el asistente de completar perfil (v1.10.0, era lo que
-    // molestaba al entrar). Se entra a la app con el borrador local
-    // y las sugerencias viven en la pestaña 🔔.
-    S.borrador = LS.get('perfil', null) || newProfile();
-    S.miPerfil = S.borrador;
-    S.perfilPublicado = false;
-  }
+  aplicarMiPerfil(mine);
   showDeck();
   startCalls();
   startPresencia();
@@ -653,16 +666,7 @@ async function restoreSession(ses, seq) {
     let mine = null;
     try { mine = await fetchMiPerfilConReintento(); } catch {}
     if (bootEsObsoleto(seq)) { abortarBootObsoleto(); return; }
-    if (mine && mine.profile) {
-      S.miPerfil = mine.profile;
-      S.perfilPublicado = true;
-      try { LS.set('perfil', fusionarBorrador(mine.profile, LS.get('perfil', null))); } catch {}
-    } else {
-      // Igual que en enterApp: sin asistente automático (v1.10.0).
-      S.borrador = LS.get('perfil', null) || newProfile();
-      S.miPerfil = S.borrador;
-      S.perfilPublicado = false;
-    }
+    aplicarMiPerfil(mine);
     showDeck();
     startCalls();
     startPresencia();
@@ -1023,7 +1027,7 @@ async function obSiguiente() {
     toast('¡Tu perfil ya está en la red! 🎉');
     showDeck();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
     btn.disabled = false;
     btn.textContent = 'Publicar mi perfil';
   }
@@ -1291,7 +1295,7 @@ async function lgAction(peerPubkey, like) {
     // Está en "Le gustas" porque ya me dio '+': mi like es match mutuo.
     if (like) showMatchOverlay(peerPubkey);
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
@@ -1402,7 +1406,7 @@ async function gridAction(peerPubkey, tipo) {
     if (mutuo) { renderGrid(); showMatchOverlay(peerPubkey); }
     else renderGrid();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
@@ -1449,7 +1453,7 @@ async function doLike(superlike) {
     if (mutuo) showMatchOverlay(c.other.pubkey);
     else nextCard();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
     setCardBusy(false);
   }
 }
@@ -1464,7 +1468,7 @@ async function doDislike() {
     marcarVisto(c.other.pubkey);
     nextCard();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
     setCardBusy(false);
   }
 }
@@ -1576,7 +1580,7 @@ async function reportarPerfil(peerPubkey) {
     await sendReporte(S.pool, peerPubkey, m);
     toast('Reporte enviado. Gracias por cuidar la comunidad.');
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
@@ -1656,7 +1660,7 @@ async function topAction(peerPubkey, like) {
     if (row) row.remove();
     if (!S.top.length) renderTop();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
@@ -2502,6 +2506,25 @@ function registrarLlamada(peer, texto) {
   if (S.chatPeer === peer) renderMsgs();
 }
 
+// Registro de una llamada terminada (v1.12.8, punto 4: ligereza): el
+// switch de 'terminada' traía copiada 7 veces la misma llamada a
+// registrarLlamada + textoRegistroLlamada. El mapa conserva el
+// comportamiento exacto: 'limite' se registra como 'completada' y
+// 'ocupado' como 'rechazada'; 'error' y cualquier otro resultado no se
+// registran. durSeg solo lo usa el texto de 'completada', así que
+// pasarlo siempre no cambia ningún texto.
+function registrarFinLlamada(e) {
+  const mapa = {
+    completada: 'completada', limite: 'completada', perdida: 'perdida',
+    'sin-respuesta': 'sin-respuesta', rechazada: 'rechazada',
+    ocupado: 'rechazada', 'sin-conexion': 'sin-conexion',
+  };
+  const resultado = mapa[e.resultado];
+  if (!resultado) return;
+  registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado, durSeg: e.durSeg }));
+}
+
+
 function iniciarLlamada(media) {
   const peer = S.chatPeer;
   if (!peer) return;
@@ -2692,30 +2715,30 @@ function onCallEvent(e) {
     const nombre = callNombre(e.peer);
     switch (e.resultado) {
       case 'completada':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
+        registrarFinLlamada(e);
         break;
       case 'limite':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'completada', durSeg: e.durSeg }));
+        registrarFinLlamada(e);
         toast(corteLimite(e.media), 9000);
         break;
       case 'perdida':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'perdida' }));
+        registrarFinLlamada(e);
         toast('📞 Llamada perdida de ' + nombre + '.');
         break;
       case 'sin-respuesta':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'sin-respuesta' }));
+        registrarFinLlamada(e);
         toast(nombre + ' no respondió.');
         break;
       case 'rechazada':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'rechazada' }));
+        registrarFinLlamada(e);
         toast(nombre + ' no pudo atender ahora.');
         break;
       case 'ocupado':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'rechazada' }));
+        registrarFinLlamada(e);
         toast(nombre + ' está en otra llamada.');
         break;
       case 'sin-conexion':
-        registrarLlamada(e.peer, textoRegistroLlamada({ media: e.media, resultado: 'sin-conexion' }));
+        registrarFinLlamada(e);
         toast('No se pudo conectar: no lo lograron ni la conexión directa ni el servidor de relevo. Revisa tu internet e inténtalo de nuevo.');
         break;
       case 'error':
@@ -2807,7 +2830,7 @@ async function toggleVideoOk(ok) {
     toast(ok ? 'Ahora aceptas videollamadas 🎥' : 'Ya no aceptas videollamadas.');
   } catch {
     S.miPerfil.videoOk = !ok;
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
     showAjustes();
   }
 }
@@ -2829,7 +2852,7 @@ async function publicarActualizacion() {
     toast('Perfil actualizado ✓');
     showAjustes();
   } catch {
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
@@ -2844,7 +2867,7 @@ async function toggleOculto(ocultar) {
     showAjustes();
   } catch {
     S.miPerfil.oculto = !ocultar;
-    toast('Sin conexión a los relays. Intenta de nuevo.');
+    avisoSinConexion();
   }
 }
 
