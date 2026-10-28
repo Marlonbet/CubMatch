@@ -39,10 +39,19 @@ if (updatePub && !(updatePub.kty === 'EC' && updatePub.crv === 'P-256' && update
 }
 
 // Un solo bundle: sirve como fallback incluido y como live remoto.
+// charset 'utf8' (v1.12.6, punto 4: ligereza de datos): por defecto
+// esbuild emite ASCII y escapa cada carácter no ASCII como \uXXXX
+// (6 bytes); la app está llena de acentos y emoji en español, así que
+// dejarlos crudos en UTF-8 recorta ~1,6 KB del bundle. No cambia la
+// sintaxis (el target sigue siendo es2020) y es seguro: el HTML único
+// declara charset utf-8 antes de los scripts, el loader decodifica el
+// bundle vivo con TextDecoder('utf-8') y los archivos se escriben y
+// firman como UTF-8.
 const result = buildSync({
   entryPoints: [join(src, 'entry.js')],
   bundle: true,
   minify: true,
+  charset: 'utf8',
   format: 'iife',
   target: ['es2020'],
   write: false,
@@ -114,7 +123,9 @@ if (!updatePub) {
 // iba tal cual con comentarios (~6,9 KB) y con esbuild baja a ~3,3 KB.
 // Se minifica DESPUÉS de sustituir los placeholders, para que la
 // versión y la clave pública queden dentro del código minificado.
-bootJs = transformSync(bootJs, { minify: true }).code;
+// charset 'utf8' (v1.12.6): igual que el bundle, los acentos de los
+// mensajes del loader van crudos en UTF-8 en vez de escapes \uXXXX.
+bootJs = transformSync(bootJs, { minify: true, charset: 'utf8' }).code;
 
 // Archivo único descargable
 // El CSS se minifica (ver tools/mincss.mjs): el archivo único se
