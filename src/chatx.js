@@ -13,7 +13,7 @@
 // subida reutiliza Blossom (foto.js); el sticker conserva su formato
 // con alfa (WebP/PNG): nada de recompresión a JPEG.
 
-import { targetDimensions } from './foto.js';
+import { targetDimensions, loadBitmap } from './foto.js';
 
 export const MAX_STICKER_LADO = 512;
 export const MAX_STICKER_BYTES = 1024 * 1024; // ~1 MB
@@ -119,7 +119,7 @@ export function stickerPesoOk(size) {
 export async function prepareStickerBlob(blob) {
   try {
     if (!blob || typeof blob.type !== 'string' || !blob.type.startsWith('image/')) return blob;
-    const { source, objUrl } = await loadStickerBitmap(blob);
+    const { source, objUrl } = await loadBitmap(blob);
     try {
       const naturalW = source.naturalWidth || source.width;
       const naturalH = source.naturalHeight || source.height;
@@ -146,29 +146,10 @@ export async function prepareStickerBlob(blob) {
   }
 }
 
-// Mismo patrón de carga que foto.js (createImageBitmap si está; si no,
-// <img> con object URL). Local a este módulo para no tocar foto.js.
-async function loadStickerBitmap(blob) {
-  if (typeof createImageBitmap === 'function') {
-    return { source: await createImageBitmap(blob), objUrl: null };
-  }
-  if (typeof Image === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) {
-    throw new Error('sin decodificador de imágenes disponible');
-  }
-  const objUrl = URL.createObjectURL(blob);
-  try {
-    const img = await new Promise((res, rej) => {
-      const im = new Image();
-      im.onload = () => res(im);
-      im.onerror = () => rej(new Error('imagen no legible'));
-      im.src = objUrl;
-    });
-    return { source: img, objUrl };
-  } catch (e) {
-    try { URL.revokeObjectURL(objUrl); } catch {}
-    throw e;
-  }
-}
+// La carga de la imagen la hace loadBitmap de foto.js (una sola
+// definición compartida con la foto de perfil): createImageBitmap si
+// está, si no <img> con object URL. Sin decodificador, rechaza y el
+// llamador devuelve el blob original intacto.
 
 // ------------------------------------------------------------ biblioteca
 

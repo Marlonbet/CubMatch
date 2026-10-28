@@ -153,7 +153,13 @@ export async function preparePhotoBlob(blob) {
   }
 }
 
-async function loadBitmap(blob) {
+// Carga una imagen como fuente dibujable (ImageBitmap o <img>).
+// Compartida con chatx.js (stickers): la misma lógica vivía copiada en
+// los dos módulos (v1.12.7, punto 4: ligereza de datos — una sola
+// definición en el bundle). Devuelve {source, objUrl}: objUrl solo
+// existe en la rama <img> y el llamador debe revocarlo y cerrar source
+// (ver preparePhotoBlob / prepareStickerBlob).
+export async function loadBitmap(blob) {
   if (typeof createImageBitmap === 'function') {
     return { source: await createImageBitmap(blob), objUrl: null };
   }
