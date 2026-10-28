@@ -194,6 +194,37 @@ export function camposFaltantes(p) {
     .sort((a, b) => b.peso - a.peso);
 }
 
+// Fusión borrador ↔ perfil publicado (bug 2026-10-28): el perfil
+// publicado en la red es la verdad de lo que ya subió el usuario, pero
+// el borrador local puede traer ediciones aún sin publicar (p. ej. una
+// foto subida que todavía no se publicó). Al entrar, el borrador se
+// sincroniza con lo publicado SIN perder esas ediciones: se parte de
+// lo publicado y solo se rellenan los campos que en lo publicado están
+// vacíos y en el borrador están llenos. Así el editor nunca muestra un
+// perfil vacío cuando en la red sí hay uno publicado, y nunca se pierde
+// una foto o un campo que el usuario ya escribió. Las banderas
+// (videoOk/oculto) siempre son las publicadas.
+export function fusionarBorrador(publicado, borrador) {
+  if (!publicado) return borrador || null;
+  const out = JSON.parse(JSON.stringify(publicado));
+  if (!borrador) return out;
+  const tienePrompt = (ps) => !!(ps && ps.some((x) => x && x.q && x.a));
+  for (const [campo] of PESOS) {
+    if (campo === 'prefs') {
+      if (!prefsLleno(out.prefs) && prefsLleno(borrador.prefs)) out.prefs = borrador.prefs;
+    } else if (campo === 'rasgos') {
+      if (!rasgosLlenos(out.rasgos) && rasgosLlenos(borrador.rasgos)) out.rasgos = borrador.rasgos;
+    } else if (campo === 'prompts') {
+      if (!tienePrompt(out.prompts) && tienePrompt(borrador.prompts)) out.prompts = borrador.prompts;
+    } else if (!lleno(out[campo]) && lleno(borrador[campo])) {
+      out[campo] = borrador[campo];
+    }
+  }
+  out.videoOk = !!publicado.videoOk;
+  out.oculto = !!publicado.oculto;
+  return out;
+}
+
 // Validación de campos obligatorios para publicar.
 export function validateProfile(p) {
   const errores = [];

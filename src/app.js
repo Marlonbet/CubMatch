@@ -23,10 +23,11 @@ import {
   parsePerfilEvent, publishPerfil, fetchPerfiles,
   sendLike, sendDislike, fetchLikes, mutualMatches, sendReporte,
   publishIdentityDocs, migrarInboxSiDesactualizado, sendDMRouted, setInboxStore,
-  mergePerfiles, mergeLikes,
+  mergePerfiles, mergeLikes, eventoMasReciente,
 } from './cubmatch.js';
 import {
   newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI, MIN_COMPLETITUD,
+  fusionarBorrador,
   PROVINCIAS, GENEROS, ORIENTACIONES, COMPLEXIONES, OJOS, PIEL, CABELLO,
   EDUCACION, SECTORES, VALORES, INTERESES, RASGOS, RELACIONES, DISTANCIAS,
   PROMPTS, MAX_BIO, MAX_TAGS,
@@ -181,6 +182,14 @@ export function dispose() {
 
 export function boot() {
   dispose();
+  // Generación de arranque (bug 2026-10-28): si otra instancia de la
+  // app arranca después (takeover del loader), el arranque viejo que
+  // quedó esperando a los relays NO debe pintar Descubrir encima de
+  // la pantalla donde ya está el usuario. Cada boot sube el contador
+  // compartido y los arranques viejos se retiran al despertar.
+  const seq = typeof window !== 'undefined'
+    ? (window.__cubmatchBootSeq = (window.__cubmatchBootSeq || 0) + 1) : 1;
+  if (typeof window !== 'undefined') window.__cubmatchBooted = true;
   const root = document.getElementById('app');
   if (root) root.innerHTML = '';
   Object.assign(S, {
@@ -188,7 +197,7 @@ export function boot() {
     miPerfil: null, perfilPublicado: false, borrador: null, obPaso: 1,
     data: null, candidatos: [], idx: 0, leGustas: [], top: [],
     chats: {}, chatPeer: null, stickerEdit: false, screen: 'inicio', cuentaModo: 'registro', infoFrom: 'inicio',
-    relayStatus: {},
+    relayStatus: {}, _stale: false,
   });
   S.perfilCache = new Map();
   // Vistos v2: mapa {pubkey: ts} (el ts manda para la reaparición de
@@ -210,8 +219,24 @@ export function boot() {
   setInboxStore({ get: (k) => LS.get(k, null), set: (k, v) => LS.set(k, v) });
   if (!wired) { wired = true; wireEvents(); }
   const ses = LS.get('sesion', null);
-  if (ses && ses.username && ses.nsec) restoreSession(ses);
+  if (ses && ses.username && ses.nsec) restoreSession(ses, seq);
   else showInicio();
+}
+
+// Arranque obsoleto: otra instancia tomó el control. Esta instancia se
+// retira sin tocar la pantalla: baja su pool y marca sus clics como
+// muertos (su listener de #app sigue registrado; sin esta marca, sus
+// clics duplicarían los de la instancia nueva).
+function abortarBootObsoleto() {
+  S._stale = true;
+  S.screen = '__stale';
+  try { if (S.pool) S.pool.shutdown(); } catch {}
+  S.pool = null;
+}
+
+function bootEsObsoleto(seq) {
+  return seq != null && typeof window !== 'undefined' &&
+    window.__cubmatchBootSeq !== undefined && seq !== window.__cubmatchBootSeq;
 }
 
 function wireEvents() {
@@ -573,6 +598,7 @@ async function submitCuenta() {
 }
 
 async function enterApp(username, sk) {
+  const seq = typeof window !== 'undefined' ? (window.__cubmatchBootSeq || 0) : 0;
   const id = importIdentity(nsecOf(sk));
   LS.set('sesion', { username, nsec: nsecOf(sk) });
   S.username = username;
@@ -585,10 +611,15 @@ async function enterApp(username, sk) {
   setScreenScope('discovery');
   $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Buscando tu perfil…') + '</div>';
   let mine = null;
-  try { mine = await fetchMyPerfil(); } catch {}
+  try { mine = await fetchMiPerfilConReintento(); } catch {}
+  if (bootEsObsoleto(seq)) { abortarBootObsoleto(); return; }
   if (mine && mine.profile) {
     S.miPerfil = mine.profile;
     S.perfilPublicado = true;
+    // El borrador local se sincroniza con lo publicado sin perder
+    // ediciones sin publicar (ver fusionarBorrador): así el editor y
+    // la 🔔 nunca muestran un perfil vacío cuando en la red sí hay uno.
+    try { LS.set('perfil', fusionarBorrador(mine.profile, LS.get('perfil', null))); } catch {}
   } else {
     // Sin perfil publicado (o sin red para leerlo): NUNCA se abre
     // solo el asistente de completar perfil (v1.10.0, era lo que
@@ -605,7 +636,7 @@ async function enterApp(username, sk) {
   migrarInboxSiToca();
 }
 
-async function restoreSession(ses) {
+async function restoreSession(ses, seq) {
   try {
     const id = importIdentity(ses.nsec);
     S.username = ses.username;
@@ -620,10 +651,12 @@ async function restoreSession(ses) {
     setScreenScope('discovery');
     $('#app').innerHTML = '<div class="screen">' + cargandoHTML('Reconectando…') + '</div>';
     let mine = null;
-    try { mine = await fetchMyPerfil(); } catch {}
+    try { mine = await fetchMiPerfilConReintento(); } catch {}
+    if (bootEsObsoleto(seq)) { abortarBootObsoleto(); return; }
     if (mine && mine.profile) {
       S.miPerfil = mine.profile;
       S.perfilPublicado = true;
+      try { LS.set('perfil', fusionarBorrador(mine.profile, LS.get('perfil', null))); } catch {}
     } else {
       // Igual que en enterApp: sin asistente automático (v1.10.0).
       S.borrador = LS.get('perfil', null) || newProfile();
@@ -642,22 +675,59 @@ async function restoreSession(ses) {
   }
 }
 
-function fetchMyPerfil() {
+// Mi perfil desde UN scope de relays: el más reciente por autor, con
+// desempate determinista por id (ver eventoMasReciente).
+function fetchMyPerfilFrom(client) {
   return new Promise((resolve) => {
     let best = null;
     const vistos = new Set(); // ids ya verificados en esta suscripción
-    const sub = S.pool.discovery().subscribe(
+    const sub = client.subscribe(
       [{ kinds: [KIND_PERFIL], authors: [S.pubkey], limit: 1 }],
       (ev) => {
         if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
         vistos.add(ev.id);
         if (!eventoValido(ev)) { console.warn('[cubmatch] perfil propio con firma inválida, descartado:', ev.id); return; }
         const p = parsePerfilEvent(ev);
-        if (p && (!best || ev.created_at > best.created_at)) best = p;
+        if (p) best = eventoMasReciente(best, p);
       }
     );
     sub.eose().then(() => { sub.unsub(); resolve(best); });
   });
+}
+
+async function fetchMyPerfil() {
+  // El perfil se publica en los 4 relays, pero una publicación puede
+  // quedar solo en messaging si discovery falló en ese momento
+  // (publishAll resuelve con que UNO acepte). Antes se consultaba
+  // solo discovery: si el perfil vivía solo en messaging, la app
+  // decía "Sin perfil publicado" aunque el perfil sí existía. Ahora
+  // se consultan ambos scopes en paralelo y gana el más reciente.
+  if (S.pool) { try { S.pool.acquire('messaging'); } catch {} }
+  try {
+    const [a, b] = await Promise.all([
+      fetchMyPerfilFrom(S.pool.discovery()),
+      fetchMyPerfilFrom(S.pool.messaging()),
+    ]);
+    return eventoMasReciente(a, b);
+  } finally {
+    if (S.pool) { try { S.pool.release('messaging'); } catch {} }
+  }
+}
+
+// Si el primer intento no encontró el perfil Y algún relay estaba
+// degradado (sin conectar), un relay lento puede no haber entregado
+// a tiempo (EOSE corta a los 8 s): un reintento tras 1,2 s. Si todos
+// los relays respondieron y no hay perfil, no se reintenta: de verdad
+// no hay perfil publicado y entrar con el borrador es lo correcto.
+async function fetchMiPerfilConReintento() {
+  let mine = null;
+  try { mine = await fetchMyPerfil(); } catch {}
+  if (!mine && S.pool &&
+      (S.pool.scopeDegraded('discovery') || S.pool.scopeDegraded('messaging'))) {
+    await new Promise((r) => setTimeout(r, 1200));
+    try { mine = await fetchMyPerfil(); } catch {}
+  }
+  return mine;
 }
 
 // ---------- 3. onboarding (8 pasos) ----------
@@ -1017,6 +1087,11 @@ async function refreshDiscovery(me, force = false) {
 // Sincronización en segundo plano tras mostrar la caché: actualiza S.data
 // y refresca la pantalla visible sin saltos (se conserva la posición).
 async function syncDiscoveryBackground() {
+  // Si la primera pintura vino de una caché vacía, el cuerpo muestra
+  // "Eso es todo por ahora" y hay que pintarlo de nuevo cuando la
+  // red trae candidatos: antes el cuerpo quedaba vacío hasta que el
+  // usuario tocaba Re-descubrir, y el candidato "no salía" en esa carga.
+  const prevLen = S.candidatos.length;
   try {
     await refreshDiscovery(meCtx(), false);
     if (!S.data) return;
@@ -1025,6 +1100,7 @@ async function syncDiscoveryBackground() {
       S.leGustas = likesYou(S.data.me, S.data.others, S.data.ctx);
       renderLeGustas();
       if (S.idx >= S.candidatos.length) S.idx = Math.max(0, S.candidatos.length - 1);
+      if (prevLen === 0 && S.candidatos.length) { S.idx = 0; renderDeckBody(); return; }
       const sub = $('#deck-sub');
       if (sub && S.candidatos.length) {
         sub.textContent = esDesktop()
@@ -3016,6 +3092,7 @@ const ACTIONS = {
 };
 
 function onAppClick(e) {
+  if (S._stale) return; // instancia vieja tras un takeover: no duplica clics
   const chip = e.target.closest('[data-chip]');
   if (chip) { toggleChip(chip); return; }
   const el = e.target.closest('[data-act]');
@@ -3031,7 +3108,15 @@ window.__cubmatchApp = { boot, dispose, version: VERSION };
 window.__cubmatchApp._test = { dmToMsg, handleReceipt, syncChatHistory, noLeidos, showDeck, renderLeGustas, lgAction, showOnboarding, onFotoChange, showChat, showChatPerfil, sendChatPayload, reintentarMsg, handleBeaconEvent, pintarPresencia, renderMsgs, renderStickerPanel, toggleStickerPanel, showLocConfirm, closeLocConfirm, enviarUbicacion, showAjustes, showAvisos, onCallEvent, getUsoRelevo: (media) => usoRelevoReg(media), toggleVideoOk, startCalls, stopCalls, handleCallSignalEvent, numMensajesChat, refreshVideoBtn, getCallSession: () => callSession, setCallDeps: (d) => { Object.assign(callDeps, d); }, getS: () => S, onGlobalDM, onGlobalLike, startGlobalLive, stopGlobalLive, nombreCorto };
 
 // Arranque automático si el módulo se carga directo (el build también puede llamar a boot).
-if (typeof document !== 'undefined') {
+// SUPRESIÓN (bug 2026-10-28): el loader pone __cubmatchSuppressAutoBoot
+// ANTES de ejecutar en línea un bundle vivo más nuevo. Sin esta guarda,
+// ese bundle arrancaba solo por este camino (microtarea al evaluar) y
+// su boot() restauraba la sesión e iba directo a Descubrir, aunque el
+// usuario ya estuviera en Matches o en 🔔 y aunque el loader hubiera
+// decidido NO tomar el control. El loader es quien decide: si toma el
+// control, llama a live.boot() él mismo.
+if (typeof document !== 'undefined' &&
+    !(typeof window !== 'undefined' && window.__cubmatchSuppressAutoBoot)) {
   if (document.readyState !== 'loading') {
     queueMicrotask(() => { try { window.__cubmatchApp.boot(); } catch {} });
   } else {

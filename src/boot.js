@@ -104,7 +104,16 @@
   function start() {
     var fallback = window.__cubmatchApp;
     if (!fallback || !fallback.boot) { note('sin app incluida'); return; }
-    fallback.boot();
+    // La app incluida ya se arranca sola al cargar (su auto-inicio va
+    // primero: el script del bundle va antes que este loader y su
+    // listener de DOMContentLoaded se registra antes que este). Si ya
+    // arrancó, NO se vuelve a llamar a boot(): un segundo boot
+    // (dispose + restaurar sesión) es trabajo doble y una ventana
+    // más para que un arranque viejo pinte Descubrir encima de la
+    // pantalla actual. La llamada es síncrona a propósito: el arranque
+    // de la app incluida debe quedar hecho al salir de start().
+    if (window.__cubmatchBooted) note('app ya arrancada por su auto-inicio');
+    else fallback.boot();
 
     // Chequeo de actualización en segundo plano: nunca bloquea la UI y
     // solo toma el control en la pantalla de inicio (no interrumpe un chat).
@@ -129,6 +138,11 @@
           if (cmp(signed, BUNDLED_VERSION) <= 0) { note('versión firmada no es más nueva, siguiente proxy'); continue; }
           var liveText = new TextDecoder('utf-8').decode(liveBuf);
           if (!validLiveText(liveText)) { note('live inválido, siguiente proxy'); continue; }
+          // El bundle vivo trae su propio auto-inicio: al evaluarlo
+          // arrancaría solo (microtarea) e iría a Descubrir aunque el
+          // usuario ya esté en otra pestaña. Se suprime ANTES de
+          // ejecutarlo; el control lo toma solo el takeover de abajo.
+          window.__cubmatchSuppressAutoBoot = true;
           runInline(liveText);
           var live = window.__cubmatchApp;
           var inicio = document.getElementById('pantalla-inicio');

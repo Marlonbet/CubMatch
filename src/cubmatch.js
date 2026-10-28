@@ -33,6 +33,30 @@ export const INBOX_TTL_MS = 24 * 3600 * 1000; // caché del inbox ajeno
 
 export const profileAddr = (pubkey) => `${KIND_PERFIL}:${pubkey}:${TAG_D}`;
 
+// Desempate determinista "el más nuevo gana" (bug 2026-10-28): dos
+// eventos del mismo autor con el mismo created_at (segundos) llegaban
+// en orden distinto según el relay y la carga ganaba según el azar —
+// un perfil aparecía en una carga y desaparecía en la siguiente. Con
+// created_at igual, gana el id mayor (hex): mismo resultado en todas
+// las cargas, sin importar el orden de llegada.
+export function eventoMasReciente(prev, cur) {
+  if (!prev) return cur;
+  if (!cur) return prev;
+  const pc = Number(prev.created_at) || 0, cc = Number(cur.created_at) || 0;
+  if (cc !== pc) return cc > pc ? cur : prev;
+  return String(cur.id || '') > String(prev.id || '') ? cur : prev;
+}
+
+// Lo mismo para likes guardados {ts, id}: a igual segundo, gana el id
+// mayor; sin id en alguno de los dos, se queda el que ya estaba.
+function likeMasNuevo(cur, prev) {
+  if (!prev) return true;
+  const ct = Number(cur.ts) || 0, pt = Number(prev.ts) || 0;
+  if (ct !== pt) return ct > pt;
+  const ci = String(cur.id || ''), pi = String(prev.id || '');
+  return ci !== '' && ci > pi;
+}
+
 export function pubkeyFromAddr(addr) {
   const m = /^30079:([0-9a-f]{64}):cubmatch-v1$/.exec(addr || '');
   return m ? m[1] : null;
@@ -85,8 +109,7 @@ async function fetchPerfilesFrom(client, { limit = 300, since = 0, includeHidden
       if (!p) return;
       if (excludeSelf && p.pubkey === excludeSelf) return;
       if (!includeHidden && p.profile.oculto) return;
-      const prev = porAutor.get(p.pubkey);
-      if (!prev || p.created_at > prev.created_at) porAutor.set(p.pubkey, p);
+      porAutor.set(p.pubkey, eventoMasReciente(porAutor.get(p.pubkey), p));
     }
   );
   await sub.eose();
@@ -115,8 +138,7 @@ export function mergePerfiles(cached, fresh) {
   for (const p of fresh || []) {
     if (!p || typeof p.id !== 'string' || vistos.has(p.id)) continue;
     vistos.add(p.id);
-    const prev = porAutor.get(p.pubkey);
-    if (!prev || p.created_at > prev.created_at) porAutor.set(p.pubkey, p);
+    porAutor.set(p.pubkey, eventoMasReciente(porAutor.get(p.pubkey), p));
   }
   return [...porAutor.values()];
 }
@@ -171,10 +193,8 @@ async function fetchLikesFrom(client, myPubkey, { since = 0 } = {}) {
   const sent = {}, received = {};
   const vistos = new Set(); // ids ya verificados en esta suscripción
   const put = (map, like) => {
-    const prev = map[like.peer];
-    if (!prev || like.created_at > prev.ts) {
-      map[like.peer] = { tipo: like.tipo, superlike: like.superlike, ts: like.created_at };
-    }
+    const cur = { tipo: like.tipo, superlike: like.superlike, ts: like.created_at, id: like.id };
+    if (likeMasNuevo(cur, map[like.peer])) map[like.peer] = cur;
   };
   const f = (base) => (since > 0 ? { ...base, since } : base);
   const sub = client.subscribe(
@@ -214,8 +234,7 @@ export function mergeLikes(cached, fresh) {
   };
   for (const lado of ['sent', 'received']) {
     for (const [peer, cur] of Object.entries(((fresh || {})[lado]) || {})) {
-      const prev = out[lado][peer];
-      if (!prev || (cur.ts || 0) > (prev.ts || 0)) out[lado][peer] = cur;
+      if (likeMasNuevo(cur, out[lado][peer])) out[lado][peer] = cur;
     }
   }
   return out;
@@ -238,10 +257,10 @@ export function integrarLikeEntrante(likes, like) {
   likes.received = likes.received || {};
   const prev = likes.received[like.peer];
   const ts = Number(like.created_at) || 0;
-  if (prev && (Number(prev.ts) || 0) >= ts) return res;
+  if (prev && !likeMasNuevo({ ts, id: like.id }, prev)) return res;
   const yoLeDiMas = likes.sent && likes.sent[like.peer] && likes.sent[like.peer].tipo === '+';
   const eraMutuo = !!prev && prev.tipo === '+' && yoLeDiMas;
-  likes.received[like.peer] = { tipo: like.tipo, superlike: !!like.superlike, ts };
+  likes.received[like.peer] = { tipo: like.tipo, superlike: !!like.superlike, ts, id: like.id };
   res.changed = true;
   if (!eraMutuo && like.tipo === '+' && yoLeDiMas) res.nuevoMatch = true;
   return res;
@@ -339,7 +358,7 @@ async function fetchOneReplaceable(pool, filters) {
       if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
       vistos.add(ev.id);
       if (!eventoValido(ev)) { console.warn('[cubmatch] evento con firma inválida, descartado:', ev.id); return; }
-      if (!best || ev.created_at > best.created_at) best = ev;
+      best = eventoMasReciente(best, ev);
     });
     sub.eose().then(() => { sub.unsub(); resolve(); });
   });
