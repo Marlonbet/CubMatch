@@ -546,6 +546,15 @@ export class CallSession {
     });
   }
 
+  // Cierre avisado en una sola vía (v1.12.9, punto 4: ligereza):
+  // avisa al par con `end` y termina con el resultado dado. El par
+  // `end` + `_terminar` vivía copiado en timeouts, ICE muerto,
+  // errores de medios, límite y colgar; ahora vive solo aquí.
+  _cortar(cur, resultado, mensaje) {
+    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
+    this._terminar(resultado, mensaje);
+  }
+
   // ------------------------------------------------- estados pegados
 
   // ¿Hay una conexión WebRTC con vida? Sin pc (timbre entrante,
@@ -589,16 +598,13 @@ export class CallSession {
       // ocupado que le corresponde y queda como perdida local.
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'reject', media: cur.media, motivo: 'ocupado' }));
       this._terminar('perdida');
-    } else if (this.state === 'conectada' || this._connectedAt) {
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('completada');
-    } else if (cur.dir === 'saliente') {
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('sin-respuesta');
-    } else {
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('sin-conexion');
+      return;
     }
+    // El resultado depende de hasta dónde llegó la llamada; el
+    // aviso `end` es el mismo en los tres casos (_cortar).
+    const resultado = (this.state === 'conectada' || this._connectedAt) ? 'completada'
+      : cur.dir === 'saliente' ? 'sin-respuesta' : 'sin-conexion';
+    this._cortar(cur, resultado);
   }
 
   // ------------------------------------------------- watchdogs
@@ -607,8 +613,7 @@ export class CallSession {
   _armConnectTimer(cur) {
     this._armTimer('_connectTimer', CONNECT_TIMEOUT_MS, () => {
       if (this.current === cur && this.state === 'conectando') {
-        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-        this._terminar('sin-conexion');
+        this._cortar(cur, 'sin-conexion');
       }
     });
   }
@@ -624,8 +629,7 @@ export class CallSession {
       const sigueCortado = this.pc.iceConnectionState === 'disconnected'
         || this.pc.connectionState === 'disconnected';
       if (!sigueCortado) return; // se recuperó sin avisar: nada que cortar
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('sin-conexion');
+      this._cortar(cur, 'sin-conexion');
     });
   }
 
@@ -670,8 +674,7 @@ export class CallSession {
   terminarPorLimite() {
     const cur = this.current;
     if (!cur || this.state === 'idle') return;
-    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-    this._terminar('limite');
+    this._cortar(cur, 'limite');
   }
 
   // ------------------------------------------------- restart de ICE
@@ -708,8 +711,7 @@ export class CallSession {
     }
     // Ni directo ni con el TURN de respaldo (o segundo fallo, o la
     // llamada ya estaba conectada): las redes no dejaron pasar.
-    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-    this._terminar('sin-conexion');
+    this._cortar(cur, 'sin-conexion');
   }
 
   // Lado que detecta el fallo: se convierte en oferente de la
@@ -728,10 +730,7 @@ export class CallSession {
       if (this.current !== cur) return;
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'offer', media: cur.media, sdp: offer.sdp, restart: true }));
     } catch {
-      if (this.current === cur) {
-        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-        this._terminar('sin-conexion');
-      }
+      if (this.current === cur) this._cortar(cur, 'sin-conexion');
     } finally {
       cur.restartEnCurso = false;
     }
@@ -755,10 +754,7 @@ export class CallSession {
       if (this.current !== cur) return;
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'answer', media: cur.media, sdp: answer.sdp }));
     } catch {
-      if (this.current === cur) {
-        this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-        this._terminar('sin-conexion');
-      }
+      if (this.current === cur) this._cortar(cur, 'sin-conexion');
     } finally {
       cur.restartEnCurso = false;
     }
@@ -891,15 +887,13 @@ export class CallSession {
       await pc.setLocalDescription(offer);
       this._sendSafe(peer, buildCallPayload({ id: cur.id, op: 'offer', media, sdp: offer.sdp }));
     } catch {
-      this._sendSafe(peer, buildCallPayload({ id: cur.id, op: 'end', media }));
-      this._terminar('sin-conexion');
+      this._cortar(cur, 'sin-conexion');
       return false;
     }
     this._emit({ tipo: 'saliente', peer, media, id: cur.id });
     this._armRingTimer(RING_TIMEOUT_MS, () => {
       if (this.current === cur && this.state === 'saliendo') {
-        this._sendSafe(peer, buildCallPayload({ id: cur.id, op: 'end', media }));
-        this._terminar('sin-respuesta');
+        this._cortar(cur, 'sin-respuesta');
       }
     });
     return true;
@@ -1016,8 +1010,7 @@ export class CallSession {
       stream = await this._getLocalStream(cur.media);
     } catch (err) {
       if (this.current !== cur) return false; // abortada mientras pedía el medio
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('error', mensajeErrorMedios(err, cur.media));
+      this._cortar(cur, 'error', mensajeErrorMedios(err, cur.media));
       return false;
     }
     if (this.current !== cur) {
@@ -1035,8 +1028,7 @@ export class CallSession {
     let pc;
     try { pc = this._createPC(iceServers); } catch { pc = null; }
     if (!pc) {
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('error', 'Este navegador no soporta llamadas (WebRTC no disponible).');
+      this._cortar(cur, 'error', 'Este navegador no soporta llamadas (WebRTC no disponible).');
       return false;
     }
     this.pc = pc;
@@ -1051,8 +1043,7 @@ export class CallSession {
       await pc.setLocalDescription(answer);
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'answer', media: cur.media, sdp: answer.sdp }));
     } catch {
-      this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-      this._terminar('sin-conexion');
+      this._cortar(cur, 'sin-conexion');
       return false;
     }
     return true;
@@ -1069,11 +1060,12 @@ export class CallSession {
   colgar() {
     const cur = this.current;
     if (!cur || this.state === 'idle') return;
-    this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
-    if (this.state === 'conectada' || this._connectedAt) this._terminar('completada');
-    else if (this.state === 'entrante') this._terminar('perdida');
-    else if (cur.dir === 'saliente') this._terminar('sin-respuesta');
-    else this._terminar('completada');
+    // El aviso `end` es el mismo; solo cambia el resultado según
+    // hasta dónde llegó la llamada (_cortar).
+    const resultado = (this.state === 'conectada' || this._connectedAt) ? 'completada'
+      : this.state === 'entrante' ? 'perdida'
+      : cur.dir === 'saliente' ? 'sin-respuesta' : 'completada';
+    this._cortar(cur, resultado);
   }
 
   // Silencia/activa el micrófono local. Devuelve el estado resultante.
