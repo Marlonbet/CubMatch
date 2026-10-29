@@ -118,11 +118,21 @@ async function fetchPerfilesFrom(client, { limit = 300, since = 0, includeHidden
 }
 
 export async function fetchPerfiles(pool, opts = {}) {
-  const res = await fetchPerfilesFrom(pool.discovery(), opts);
-  if (res.length === 0 && pool.scopeDegraded('discovery')) {
-    return fetchPerfilesFrom(pool.messaging(), opts);
+  // AMBOS scopes en paralelo: un perfil puede vivir solo en messaging
+  // (publishAll resuelve con que UNO acepte) y una descarga parcial
+  // (EOSE corta a los 8 s si un relay va lento) no debe dejar fuera
+  // perfiles que la app ya conoce. La fusión por autor con
+  // eventoMasReciente absorbe los duplicados entre scopes.
+  if (pool && typeof pool.acquire === 'function') { try { pool.acquire('messaging'); } catch {} }
+  try {
+    const [a, b] = await Promise.all([
+      fetchPerfilesFrom(pool.discovery(), opts),
+      fetchPerfilesFrom(pool.messaging(), opts),
+    ]);
+    return mergePerfiles(a, b);
+  } finally {
+    if (pool && typeof pool.release === 'function') { try { pool.release('messaging'); } catch {} }
   }
-  return res;
 }
 
 // Fusión incremental (caché + red): dedup por id de evento; en el
@@ -218,12 +228,25 @@ async function fetchLikesFrom(client, myPubkey, { since = 0 } = {}) {
 }
 
 export async function fetchLikes(pool, myPubkey, opts = {}) {
-  const res = await fetchLikesFrom(pool.discovery(), myPubkey, opts);
-  const empty = Object.keys(res.sent).length === 0 && Object.keys(res.received).length === 0;
-  if (empty && pool.scopeDegraded('discovery')) {
-    return fetchLikesFrom(pool.messaging(), myPubkey, opts);
+  // AMBOS scopes en paralelo, igual que los perfiles: un like puede
+  // vivir solo en messaging (publishAll resuelve con que UNO acepte)
+  // y el fallback viejo solo consultaba messaging si discovery venía
+  // TOTALMENTE vacío y degradado. Un resultado parcial (p. ej. el
+  // like recibido que hace el match, ausente porque un relay fue
+  // lento y EOSE cortó a los 8 s) se aceptaba como completo y, tras
+  // un Actualizar que borraba la caché, el match desaparecía hasta
+  // que otra descarga lo volvía a traer. mergeLikes (gana el más
+  // nuevo por contraparte) absorbe los duplicados entre scopes.
+  if (pool && typeof pool.acquire === 'function') { try { pool.acquire('messaging'); } catch {} }
+  try {
+    const [a, b] = await Promise.all([
+      fetchLikesFrom(pool.discovery(), myPubkey, opts),
+      fetchLikesFrom(pool.messaging(), myPubkey, opts),
+    ]);
+    return mergeLikes(a, b);
+  } finally {
+    if (pool && typeof pool.release === 'function') { try { pool.release('messaging'); } catch {} }
   }
-  return res;
 }
 
 // Fusión incremental de likes: por contraparte gana el ts más nuevo.

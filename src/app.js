@@ -1120,11 +1120,19 @@ async function syncDiscoveryBackground() {
   } catch { /* la caché sigue visible; se reintenta en la próxima pantalla */ }
 }
 
-// "Re-descubrir" / "Actualizar": borra caché y lastSync, descarga todo.
+// "Re-descubrir" / "Actualizar": re-descarga TODO desde la red
+// (lastSync a 0), pero SIN borrar las cachés locales. Borrarlas antes
+// de descargar hacía que una descarga parcial (un relay lento, EOSE
+// corta a los 8 s) borrara matches ya conocidos: la ausencia de un
+// evento en UNA descarga no prueba que no exista, así que la fusión
+// (mergePerfiles/mergeLikes, gana el más nuevo) solo suma y actualiza,
+// nunca borra. Con la caché borrada, si en la descarga faltaba el like
+// recibido el match salía de Matches y, si también faltaba el enviado,
+// reaparecía en Descubrir; si solo faltaba el recibido, no salía en
+// ningún lado (el enviado lo oculta del mazo) hasta que otra descarga
+// completa lo volvía a traer, p. ej. al cerrar sesión y volver a entrar.
 function forceRefresh() {
   S.data = null;
-  LS.del(LS_PERFILES);
-  LS.del(LS_LIKES);
   LS.del(LS_SYNC_D);
 }
 

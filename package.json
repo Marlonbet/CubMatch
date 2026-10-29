@@ -16,7 +16,7 @@
     "test": "node --test \"test/*.test.mjs\""
   },
   "type": "module",
-  "version": "1.12.10",
+  "version": "1.12.11",
   "overrides": {
     "@noble/hashes": "$@noble/hashes"
   }
