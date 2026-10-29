@@ -517,7 +517,7 @@ export class CallSession {
     this._connectedAt = 0;
     this.muted = false;
     if (this.localStream) {
-      try { for (const t of this.localStream.getTracks()) t.stop(); } catch {}
+      this._pararPistas(this.localStream);
       this.localStream = null;
     }
     this.remoteStream = null;
@@ -553,6 +553,28 @@ export class CallSession {
   _cortar(cur, resultado, mensaje) {
     this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'end', media: cur.media }));
     this._terminar(resultado, mensaje);
+  }
+
+
+  // Vigencia de una llamada en curso (v1.12.10, punto 4: ligereza):
+  // la guarda "hay pc Y la llamada actual sigue siendo esta" vivía
+  // copiada en 11 sitios con los operandos en distinto orden (las
+  // dos escrituras niegan lo mismo). Ahora vive solo aquí. NO
+  // sustituye a las guardas por id de los handlers de
+  // señalización, que comparan otra cosa, ni a las guardas de
+  // identidad sin pc de antes de crear el pc (llamar y aceptar):
+  // ahí todavía no hay pc que exigir.
+  _vigente(cur) {
+    return !!this.pc && this.current === cur;
+  }
+
+  // Parada de pistas de un stream (v1.12.10): detener todos los
+  // tracks tragándose errores, como vivía copiado en _reset, al
+  // llamar y al aceptar cuando la llamada se aborta a mitad de
+  // camino. Sin stream no hay nada que parar.
+  _pararPistas(stream) {
+    if (!stream) return;
+    try { for (const t of stream.getTracks()) t.stop(); } catch {}
   }
 
   // ------------------------------------------------- estados pegados
@@ -625,7 +647,7 @@ export class CallSession {
   _armIceWatchdog(cur) {
     if (this._iceWatchdog != null) return;
     this._armTimer('_iceWatchdog', ICE_DISCONNECTED_GRACE_MS, () => {
-      if (this.current !== cur || !this.pc) return;
+      if (!this._vigente(cur)) return;
       const sigueCortado = this.pc.iceConnectionState === 'disconnected'
         || this.pc.connectionState === 'disconnected';
       if (!sigueCortado) return; // se recuperó sin avisar: nada que cortar
@@ -649,7 +671,7 @@ export class CallSession {
   }
 
   async _muestrear(cur) {
-    if (this.current !== cur || this.state !== 'conectada' || !this.pc) return;
+    if (!this._vigente(cur) || this.state !== 'conectada') return;
     const ahora = this._now();
     const delta = ahora - this._ultimaMuestra;
     this._ultimaMuestra = ahora;
@@ -685,9 +707,9 @@ export class CallSession {
   // caché joven reutiliza las que hay. Si el pc no soporta
   // setConfiguration, se sigue con la config de nacimiento.
   async _refrescarConfigPc(cur) {
-    if (!this.pc || this.current !== cur) return;
+    if (!this._vigente(cur)) return;
     const iceServers = await this._pedirIceServers();
-    if (!this.pc || this.current !== cur) return;
+    if (!this._vigente(cur)) return;
     if (typeof this.pc.setConfiguration === 'function') {
       try { this.pc.setConfiguration({ iceServers }); } catch {}
     }
@@ -721,11 +743,11 @@ export class CallSession {
   async _reiniciarIce(cur) {
     cur.restartEnCurso = true;
     try {
-      if (!this.pc || this.current !== cur) return;
+      if (!this._vigente(cur)) return;
       await this._refrescarConfigPc(cur); // config ICE fresca antes de renegociar
-      if (!this.pc || this.current !== cur) return;
+      if (!this._vigente(cur)) return;
       const offer = await this.pc.createOffer({ iceRestart: true });
-      if (this.current !== cur || !this.pc) return;
+      if (!this._vigente(cur)) return;
       await this.pc.setLocalDescription(offer);
       if (this.current !== cur) return;
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'offer', media: cur.media, sdp: offer.sdp, restart: true }));
@@ -742,14 +764,14 @@ export class CallSession {
   async _responderRestart(cur, payload) {
     cur.restartEnCurso = true;
     try {
-      if (!this.pc || this.current !== cur) return;
+      if (!this._vigente(cur)) return;
       await this._refrescarConfigPc(cur); // también reúne candidatos con config fresca
-      if (!this.pc || this.current !== cur) return;
+      if (!this._vigente(cur)) return;
       await this.pc.setRemoteDescription({ type: 'offer', sdp: payload.sdp });
-      if (this.current !== cur || !this.pc) return;
+      if (!this._vigente(cur)) return;
       await this._flushIce();
       const answer = await this.pc.createAnswer();
-      if (this.current !== cur || !this.pc) return;
+      if (!this._vigente(cur)) return;
       await this.pc.setLocalDescription(answer);
       if (this.current !== cur) return;
       this._sendSafe(cur.peer, buildCallPayload({ id: cur.id, op: 'answer', media: cur.media, sdp: answer.sdp }));
@@ -857,7 +879,7 @@ export class CallSession {
       return false;
     }
     if (this.current !== cur) { // abortada mientras pedía el medio
-      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      this._pararPistas(stream);
       return false;
     }
     this.localStream = stream;
@@ -866,7 +888,7 @@ export class CallSession {
     // crear el pc: la fábrica la recibe y construye con ella.
     const iceServers = await this._pedirIceServers();
     if (this.current !== cur) { // abortada mientras pedía la config
-      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      this._pararPistas(stream);
       return false;
     }
     let pc;
@@ -1014,7 +1036,7 @@ export class CallSession {
       return false;
     }
     if (this.current !== cur) {
-      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      this._pararPistas(stream);
       return false;
     }
     this.localStream = stream;
@@ -1022,7 +1044,7 @@ export class CallSession {
     // Igual que al llamar: config ICE vigente antes de crear el pc.
     const iceServers = await this._pedirIceServers();
     if (this.current !== cur) { // abortada mientras pedía la config
-      try { for (const t of stream.getTracks()) t.stop(); } catch {}
+      this._pararPistas(stream);
       return false;
     }
     let pc;
