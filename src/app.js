@@ -1307,13 +1307,27 @@ async function lgAction(peerPubkey, like) {
   }
 }
 
-function cardHTML(c) {
+// Tarjeta de perfil en una sola definición (v1.12.12, punto 4):
+// la vista swipe (cardHTML) y la cuadrícula de escritorio
+// (gridCardHTML) eran el mismo cuerpo copiado: foto + compat,
+// nombre/edad, lugar, bio, tres palabras, chips y los 4 botones.
+// Solo cambian: los prompts (solo en swipe), el tope de chips
+// (10 en swipe, 6 en la cuadrícula), la clase grid-card, el
+// tamaño 'sm' y el data-peer de los botones, y el prefijo de las
+// acciones (deck-* / grid-*). El parámetro grid elige la variante;
+// renderGrid NO puede pasar tarjetaHTML directo a .map porque
+// .map le pasaría el índice como segundo argumento.
+function tarjetaHTML(c, grid = false) {
   const p = c.other.profile;
-  const prompts = (p.prompts || []).filter((x) => x && x.q).slice(0, 3).map((x) =>
+  const prompts = grid ? '' : (p.prompts || []).filter((x) => x && x.q).slice(0, 3).map((x) =>
     '<div class="prompt"><b>' + esc(x.q) + '</b><span>' + esc(x.a || '') + '</span></div>').join('');
-  const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 10)
+  const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, grid ? 6 : 10)
     .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
-  return '<div class="tarjeta">' +
+  const act = grid ? 'grid' : 'deck';
+  const sm = grid ? ' sm' : '';
+  const peer = grid ? ' data-peer="' + esc(c.other.pubkey) + '"' : '';
+  const dis = superlikeDisponible() ? '' : ' disabled';
+  return '<div class="tarjeta' + (grid ? ' grid-card' : '') + '">' +
     '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
     '<div class="' + compatCls(c) + '">' + compatTxt(c) + '</div></div>' +
     '<div class="t-body">' +
@@ -1325,10 +1339,10 @@ function cardHTML(c) {
     (chips ? '<div class="chips static">' + chips + '</div>' : '') +
     '</div>' +
     '<div class="t-actions">' +
-    '<button type="button" class="btn round dislike" data-act="deck-no" title="No me interesa" aria-label="No me interesa">✕</button>' +
-    '<button type="button" class="btn round info" data-act="deck-info" title="Más info" aria-label="Ver más información de este perfil">i</button>' +
-    '<button type="button" class="btn round super" data-act="deck-super"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)" aria-label="Super-like (1 por día)">⭐</button>' +
-    '<button type="button" class="btn round like" data-act="deck-si" title="Me gusta" aria-label="Me gusta">♥</button>' +
+    '<button type="button" class="btn round' + sm + ' dislike" data-act="' + act + '-no"' + peer + ' title="No me interesa" aria-label="No me interesa">✕</button>' +
+    '<button type="button" class="btn round' + sm + ' info" data-act="' + act + '-info"' + peer + ' title="Más info" aria-label="Ver más información de este perfil">i</button>' +
+    '<button type="button" class="btn round' + sm + ' super" data-act="' + act + '-super"' + peer + dis + ' title="Super-like (1 por día)" aria-label="Super-like (1 por día)">⭐</button>' +
+    '<button type="button" class="btn round' + sm + ' like" data-act="' + act + '-si"' + peer + ' title="Me gusta" aria-label="Me gusta">♥</button>' +
     '</div></div>';
 }
 
@@ -1342,29 +1356,6 @@ function esDesktop() {
 function renderDeckBody() {
   if (esDesktop()) renderGrid();
   else renderCard();
-}
-
-function gridCardHTML(c) {
-  const p = c.other.profile;
-  const chips = [...(p.valores || []), ...(p.intereses || [])].slice(0, 6)
-    .map((v) => '<span class="chip mini">' + esc(v) + '</span>').join('');
-  const pk = esc(c.other.pubkey);
-  return '<div class="tarjeta grid-card">' +
-    '<div class="t-foto">' + avatarImg(c.other.pubkey, p, 'avatar big') +
-    '<div class="' + compatCls(c) + '">' + compatTxt(c) + '</div></div>' +
-    '<div class="t-body">' +
-    '<h3>' + nombreEdad(p) + '</h3>' +
-    '<p class="muted">📍 ' + lugar(p) + '</p>' +
-    (p.bio ? '<p class="bio">' + esc(p.bio) + '</p>' : '') +
-    (p.tresPalabras ? '<p class="trespal">“' + esc(p.tresPalabras) + '”</p>' : '') +
-    (chips ? '<div class="chips static">' + chips + '</div>' : '') +
-    '</div>' +
-    '<div class="t-actions">' +
-    '<button type="button" class="btn round sm dislike" data-act="grid-no" data-peer="' + pk + '" title="No me interesa" aria-label="No me interesa">✕</button>' +
-    '<button type="button" class="btn round sm info" data-act="grid-info" data-peer="' + pk + '" title="Más info" aria-label="Ver más información de este perfil">i</button>' +
-    '<button type="button" class="btn round sm super" data-act="grid-super" data-peer="' + pk + '"' + (superlikeDisponible() ? '' : ' disabled') + ' title="Super-like (1 por día)" aria-label="Super-like (1 por día)">⭐</button>' +
-    '<button type="button" class="btn round sm like" data-act="grid-si" data-peer="' + pk + '" title="Me gusta" aria-label="Me gusta">♥</button>' +
-    '</div></div>';
 }
 
 // Aviso discreto cuando el pool vino relajado (pocos candidatos:
@@ -1386,7 +1377,7 @@ function renderGrid() {
     return;
   }
   if (sub) sub.textContent = S.candidatos.length + (S.candidatos.length === 1 ? ' perfil para ti' : ' perfiles para ti');
-  body.innerHTML = relaxNoteHTML() + '<div class="deck-grid">' + S.candidatos.slice(0, 12).map(gridCardHTML).join('') + '</div>';
+  body.innerHTML = relaxNoteHTML() + '<div class="deck-grid">' + S.candidatos.slice(0, 12).map((c) => tarjetaHTML(c, true)).join('') + '</div>';
 }
 
 // Like/dislike/super-like desde la cuadrícula: mismo envío a la red
@@ -1431,7 +1422,7 @@ function renderCard() {
     return;
   }
   if (sub) sub.textContent = 'Perfil ' + (S.idx + 1) + ' de ' + S.candidatos.length;
-  body.innerHTML = relaxNoteHTML() + cardHTML(c);
+  body.innerHTML = relaxNoteHTML() + tarjetaHTML(c);
 }
 
 function nextCard() {
