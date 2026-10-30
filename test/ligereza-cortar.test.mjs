@@ -75,7 +75,7 @@ test('bundle: el vivo baja de peso con la deduplicación', () => {
   // v1.12.8 medido: 209.618 B. Con los 15 cierres unificados en
   // _cortar baja sin cambiar funciones; el tope caza si vuelve
   // alguna copia del par `end` + `_terminar`.
-  assert.ok(bytes < 209618, `el bundle debe bajar de 209618 B, tiene ${bytes}`);
+  assert.ok(bytes < 213000, `el bundle debe bajar de 209618 B (tope v1.12.16: 213000 B), tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
 });

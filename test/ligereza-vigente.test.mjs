@@ -137,7 +137,10 @@ test('bundle: el vivo baja de peso con la deduplicación', () => {
   // añade ~74 B de código necesario; la guarda contra copias sigue
   // siendo el conteo de patrones de arriba. v1.12.15 medido:
   // ~209053 B — el aviso anti-fraude del punto 5 añade ~1,9 KB.
-  assert.ok(bytes < 210000, `el bundle debe mantenerse por debajo de 210000 B, tiene ${bytes}`);
+  // v1.12.16 medido: ~211885 B — el borrado para ambos añade
+  // ~2,8 KB. Los seis topes de la era de ligereza suben juntos a
+  // 213000 B por la misma razón; la guarda sigue siendo el conteo.
+  assert.ok(bytes < 213000, `el bundle debe mantenerse por debajo de 213000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
 });

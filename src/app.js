@@ -41,11 +41,11 @@ import {
 import { buildCorpus, rankCandidates, topDaily, likesYou, compatLabel } from './matching.js';
 import { preparePhotoBlob, uploadPhoto } from './foto.js';
 import {
-  parseChatPayload, buildLocPayload, buildStickerPayload, osmUrl, geoErrorTexto,
+  parseChatPayload, buildLocPayload, buildStickerPayload, buildBorrarPayload, osmUrl, geoErrorTexto,
   loadStickers, addSticker, removeSticker,
   prepareStickerBlob, stickerPesoOk,
 } from './chatx.js';
-import { fusionarMensajes, estadoVisible, marcarColgados } from './mensajes.js';
+import { fusionarMensajes, estadoVisible, estadoNormalizado, marcarColgados, esTmpId, aplicarBorrado } from './mensajes.js';
 import {
   KIND_PRESENCIA, BEACON_CADA_MS, textoPresencia, parseBeacon,
 } from './presencia.js';
@@ -1718,6 +1718,45 @@ function saveChats() {
   LS.set('chats', S.chats);
 }
 
+// Lápidas de borrado para ambos (v1.12.16): por peer, la lista de
+// {id, por} donde `por` es la pubkey del autor del borrado. Guardar
+// QUIÉN borró es lo que hace justa la lápida: al llegar el DM
+// original, dmToMsg solo lo descarta si su autor coincide con el
+// autor del borrado — un borrado hostil que intentara borrar un
+// mensaje ajeno no puede esconderlo en una re-sincronización.
+function borradosLS() {
+  return LS.get('chats_borrados', {});
+}
+function saveBorrados(b) {
+  LS.set('chats_borrados', b);
+}
+
+// Aplica un borrado para ambos en el chat con `peer`. esMio = el
+// borrado lo mandé yo (mi mensaje) o lo mandó el peer (el suyo); la
+// regla justa vive en aplicarBorrado y un borrado ajeno se ignora.
+// La lápida se guarda siempre (aunque el mensaje aún no haya
+// llegado: si llega después, dmToMsg lo descarta), pero solo con el
+// autor del borrado, para que no sirva para esconder mensajes ajenos.
+function aplicarBorrarEnChat(peer, targetId, esMio) {
+  if (!peer || typeof targetId !== 'string') return false;
+  const por = esMio ? S.pubkey : peer;
+  const b = borradosLS();
+  const arr = b[peer] || [];
+  if (!arr.some((x) => x && x.id === targetId && x.por === por)) {
+    arr.push({ id: targetId, por });
+    b[peer] = arr;
+    saveBorrados(b);
+  }
+  if (!S.chats) S.chats = chatsLS();
+  if (!S.chats[peer]) S.chats[peer] = [];
+  const ok = aplicarBorrado(S.chats[peer], targetId, esMio);
+  if (ok) {
+    saveChats();
+    if (S.chatPeer === peer) renderMsgs();
+  }
+  return ok;
+}
+
 // Ids de eventos (DMs/receipts/beacons) cuya firma ya se verificó en
 // esta sesión. Un mismo evento llega una vez por relay; se verifica
 // una sola vez.
@@ -1747,9 +1786,19 @@ async function dmToMsg(ev) {
     ? (ev.tags.find((t) => t[0] === 'p') || [])[1]
     : ev.pubkey;
   if (!peer) return null;
+  // Borrado ya aplicado: el DM original no vuelve a entrar (ni por
+  // sync ni por eco en vivo), aunque el borrado llegara antes que él.
+  // Solo si el autor del DM es el autor del borrado (ver borradosLS).
+  if ((borradosLS()[peer] || []).some((x) => x && x.id === ev.id && x.por === ev.pubkey)) return null;
   let text;
   try { text = await S.pool.messaging().decryptDM(ev); }
   catch { return null; }
+  // DM de control (borrado para ambos): no es un mensaje. El llamante
+  // lo aplica con aplicarBorrarEnChat; nunca se pinta ni se notifica.
+  const p = parseChatPayload(text);
+  if (p && p.tipo === 'borrar') {
+    return { peer, borrar: p.id, fromMe: ev.pubkey === S.pubkey };
+  }
   const msg = {
     peer,
     msg: {
@@ -1790,9 +1839,10 @@ function handleReceipt(peer, ev) {
 }
 
 // Cuántos mensajes del peer siguen sin leer en un chat.
-// (Es lo que muestra el badge "N nuevos" en Matches.)
+// (Es lo que muestra el badge "N nuevos" en Matches.) Un mensaje
+// eliminado para ambos ya no cuenta: su contenido no está.
 function noLeidos(chat) {
-  return (chat || []).filter((m) => m.from === 'peer' && !m.read).length;
+  return (chat || []).filter((m) => m.from === 'peer' && !m.read && !m.eliminado).length;
 }
 
 // Historial incremental: pide solo lo nuevo desde el último sync
@@ -1812,7 +1862,9 @@ async function syncChatHistory() {
   for (const ev of events) {
     if (ev.kind === 4) {
       const r = await dmToMsg(ev);
-      if (r) pushMsg(r.peer, r.msg);
+      if (!r) continue;
+      if (r.borrar) { aplicarBorrarEnChat(r.peer, r.borrar, r.fromMe); continue; }
+      pushMsg(r.peer, r.msg);
     }
   }
   for (const ev of events) {
@@ -1899,6 +1951,7 @@ function showChat(peerPubkey) {
       if (S.chatPeer !== peerPubkey) return;
       const r = await dmToMsg(ev);
       if (r && r.peer === peerPubkey) {
+        if (r.borrar) { aplicarBorrarEnChat(peerPubkey, r.borrar, r.fromMe); renderMsgs(); return; }
         pushMsg(peerPubkey, r.msg);
         renderMsgs();
         if (r.msg.from === 'peer') {
@@ -1934,6 +1987,14 @@ function renderMsgs() {
       return '<div class="msg call-log"><span>' + esc(m.text) +
         ' <small class="muted">' + horaCorta(m.ts) + '</small></span></div>';
     }
+    // Borrado para ambos (v1.12.16): el contenido ya no está, pero
+    // queda la huella visible (autor, hora) en ambos lados — el
+    // borrado nunca es silencioso.
+    if (m.eliminado) {
+      return '<div class="msg ' + m.from + '"><div class="bubble eliminado">' +
+        '<span class="muted">🗑️ Mensaje eliminado</span> ' +
+        '<span class="mmeta">' + horaCorta(m.ts) + '</span></div></div>';
+    }
     // Estados de envío (v1.8.0, mensajes.js): cada tick tiene detrás
     // una señal real — 🕐 publicando, ✓ ≥1 relay aceptó, ✓✓ en color
     // = receipt de lectura (kind 24503). Sin señal no hay estado.
@@ -1944,7 +2005,11 @@ function renderMsgs() {
     const meta = '<span class="mmeta">' + horaCorta(m.ts) + ' ' + tick + '</span>';
     const retry = ev === 'error'
       ? '<button type="button" class="msg-retry" data-act="chat-reintentar" data-mid="' + esc(m.id) + '">⚠ No enviado · Toca para reintentar</button>' : '';
-    const wrap = (bubble) => '<div class="msg ' + m.from + (retry ? ' con-error' : '') + '">' + bubble + retry + '</div>';
+    // Tocar un mensaje propio abre la confirmación de borrado para
+    // ambos (onAppClick); los del otro no llevan marca: no se pueden
+    // borrar (regla justa).
+    const midAttr = m.from === 'me' ? ' data-borrar-mid="' + esc(m.id) + '"' : '';
+    const wrap = (bubble) => '<div class="msg ' + m.from + (retry ? ' con-error' : '') + midAttr + '">' + bubble + retry + '</div>';
     // DMs especiales (v1.6.0): payloads JSON de chatx (ubicación/sticker).
     // Si el parseo falla (JSON hostil o cliente viejo), cae a texto plano.
     const p = parseChatPayload(m.text);
@@ -2089,6 +2154,58 @@ async function enviarChatConfirmado() {
     await sendChatPayload(text);
   } catch {
     toast('No se pudo enviar. Quedó en el chat para reintentar.');
+  }
+}
+
+// ---------- borrado para ambos (v1.12.16, regla justa) ----------
+// Solo tus propios mensajes, y solo para ambos lados a la vez: tocar
+// un mensaje propio abre esta confirmación (los del otro no la
+// tienen). El borrado viaja como DM cifrado al otro cliente, que lo
+// aplica en vivo si tiene la app abierta o al sincronizar si no.
+// En ambos chats queda la huella "Mensaje eliminado": el borrado
+// nunca reescribe la historia en silencio.
+function showBorrarConfirm(mid) {
+  const peer = S.chatPeer;
+  if (!peer) return;
+  const m = (S.chats[peer] || []).find((x) => x.id === mid);
+  if (!m || m.from !== 'me' || m.eliminado || m.tipo) return;
+  closeBorrarConfirm();
+  S.borrarPendiente = mid;
+  crearOverlay('borrar-overlay', '<div class="sheet loc" role="dialog" aria-label="Eliminar mensaje">' +
+    '<button type="button" class="x" data-act="chat-borrar-no" aria-label="Cancelar">✕</button>' +
+    '<h3>🗑️ ¿Eliminar para ambos?</h3>' +
+    '<p>Este mensaje se borrará <b>en tu chat y en el de ' + esc(chatPeerNombre()) + '</b>. En ambos quedará la marca “Mensaje eliminado”.</p>' +
+    '<p class="muted">Solo puedes borrar tus propios mensajes: el otro no puede borrar lo que escribiste tú, y tú no puedes borrar lo que escribió él.</p>' +
+    '<div class="share-btns">' +
+    '<button type="button" class="btn primary big" data-act="chat-borrar-si">Eliminar para ambos</button>' +
+    '<button type="button" class="btn ghost big" data-act="chat-borrar-no">Cancelar</button>' +
+    '</div></div>', closeBorrarConfirm);
+}
+
+function closeBorrarConfirm() {
+  const ov = $('#borrar-overlay');
+  if (ov) ov.remove();
+}
+
+async function confirmarBorrar() {
+  closeBorrarConfirm();
+  const mid = S.borrarPendiente;
+  S.borrarPendiente = null;
+  const peer = S.chatPeer;
+  if (!mid || !peer) return;
+  const m = (S.chats[peer] || []).find((x) => x.id === mid);
+  if (!m || m.from !== 'me' || m.eliminado || m.tipo) return;
+  // Sin id real (aún enviándose o con error): el otro no lo tiene
+  // confirmado; basta con borrarlo aquí, sin DM de control.
+  if (esTmpId(m.id) || estadoNormalizado(m) !== 'enviado') {
+    aplicarBorrarEnChat(peer, mid, true);
+    return;
+  }
+  try {
+    await sendDMRouted(S.pool, peer, buildBorrarPayload(m.id));
+    aplicarBorrarEnChat(peer, mid, true);
+  } catch {
+    toast('Sin conexión: no se pudo eliminar para ambos. El mensaje sigue ahí.');
   }
 }
 
@@ -2382,6 +2499,7 @@ function nombreCorto(peerPubkey) {
 async function onGlobalDM(ev) {
   const r = await dmToMsg(ev); // firma (C1) + descifrado; null si no vale
   if (!r) return;
+  if (r.borrar) { aplicarBorrarEnChat(r.peer, r.borrar, r.fromMe); return; } // sin toast
   pushMsg(r.peer, r.msg); // dedup por id: si el chat está abierto, él lo pinta
   if (r.msg.from !== 'peer') return;
   if (S.screen === 'chat' && S.chatPeer === r.peer) return; // el chat ya lo muestra
@@ -3138,6 +3256,8 @@ const ACTIONS = {
   'chat-loc-no': () => closeLocConfirm(),
   'chat-dato-si': () => { void enviarChatConfirmado(); },
   'chat-dato-no': () => { closeDatoConfirm(); const input = $('#chat-input'); if (input) input.focus(); },
+  'chat-borrar-si': () => { void confirmarBorrar(); },
+  'chat-borrar-no': () => closeBorrarConfirm(),
   'chat-stickers': () => toggleStickerPanel(),
   'sticker-send': (el) => { if (!S.stickerEdit) enviarSticker(el.dataset.url); },
   'sticker-del': (el) => { removeSticker(LS, S.pubkey, el.dataset.url); renderStickerPanel(); },
@@ -3160,9 +3280,12 @@ function onAppClick(e) {
   const chip = e.target.closest('[data-chip]');
   if (chip) { toggleChip(chip); return; }
   const el = e.target.closest('[data-act]');
-  if (!el) return;
-  const fn = ACTIONS[el.dataset.act];
-  if (fn) fn(el, e);
+  if (el) { const fn = ACTIONS[el.dataset.act]; if (fn) fn(el, e); return; }
+  // Tocar un mensaje propio (no un enlace ni un botón dentro de él)
+  // abre la confirmación de borrado para ambos.
+  if (e.target.closest('a,button')) return;
+  const b = e.target.closest('[data-borrar-mid]');
+  if (b) showBorrarConfirm(b.dataset.borrarMid);
 }
 
 // ---------- final ----------

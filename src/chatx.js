@@ -41,7 +41,14 @@ export function buildLocPayload(lat, lon) {
   return JSON.stringify({ t: 'loc', lat: r(lat), lon: r(lon) });
 }
 
-// Payload de sticker: solo la URL pública del blob ya subido.
+// Payload de borrado para ambos (v1.12.16): un DM cifrado como los
+// demás, no un evento público kind 5 — el borrado no debe filtrar
+// metadatos a terceros. Solo el id del DM a borrar; la regla justa
+// (solo el autor borra lo suyo) la aplica aplicarBorrado en mensajes.js.
+export function buildBorrarPayload(id) {
+  if (typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) throw new Error('id de mensaje inválido');
+  return JSON.stringify({ t: 'borrar', id });
+}
 export function buildStickerPayload(url) {
   if (!esUrlHttp(url)) throw new Error('URL de sticker inválida');
   return JSON.stringify({ t: 'sticker', url });
@@ -64,6 +71,10 @@ export function parseChatPayload(text) {
   if (o.t === 'sticker') {
     if (!esUrlHttp(o.url)) return null;
     return { tipo: 'sticker', url: o.url };
+  }
+  if (o.t === 'borrar') {
+    if (typeof o.id !== 'string' || !/^[0-9a-f]{64}$/.test(o.id)) return null;
+    return { tipo: 'borrar', id: o.id };
   }
   return null;
 }

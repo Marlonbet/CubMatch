@@ -36,9 +36,10 @@ export function estadoNormalizado(m) {
 }
 
 // Lo que la UI pinta junto a la hora: 'enviando' | 'enviado' |
-// 'error' | 'visto' | null (mensajes del otro / registros locales).
+// 'error' | 'visto' | null (mensajes del otro / registros locales /
+// mensajes eliminados para ambos: sin estado de envío).
 export function estadoVisible(m) {
-  if (!m || m.from !== 'me' || m.tipo) return null;
+  if (!m || m.from !== 'me' || m.tipo || m.eliminado) return null;
   if (m.read) return 'visto';
   return estadoNormalizado(m);
 }
@@ -77,7 +78,24 @@ export function fusionarMensajes(lista, entrante) {
   return arr;
 }
 
-// Un 'enviando' que lleva demasiado tiempo sin confirmación quedó
+// Borrado para ambos (v1.12.16), regla JUSTA en una sola función:
+// solo el autor puede borrar su propio mensaje, y solo el contenido
+// desaparece: queda la huella (id, autor, hora) para que el borrado
+// sea visible en ambos lados, nunca silencioso. Devuelve true si se
+// aplicó. NO borra: mensajes del otro (esMio debe coincidir con el
+// autor), registros locales de llamada (tipo 'call', no son DMs) ni
+// mensajes ya eliminados (idempotente: un segundo borrado no cambia
+// nada). La lista se muta in situ, como fusionarMensajes.
+export function aplicarBorrado(lista, targetId, esMio) {
+  const arr = Array.isArray(lista) ? lista : [];
+  const m = arr.find((x) => x && x.id === targetId);
+  if (!m || m.tipo || m.eliminado) return false;
+  if (esMio ? m.from !== 'me' : m.from !== 'peer') return false;
+  m.text = '';
+  m.eliminado = true;
+  return true;
+}
+
 // colgado (la app se cerró a mitad de envío, p. ej.): pasa a 'error'
 // para que el usuario pueda reintentar. Devuelve cuántos cambiaron.
 export function marcarColgados(lista, ahoraMs, umbralMs = 60000) {

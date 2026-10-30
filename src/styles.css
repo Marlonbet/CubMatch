@@ -532,6 +532,9 @@ textarea { resize: vertical; }
 }
 .msg.me .bubble { background: var(--azul); color: #fff; border-bottom-right-radius: 6px; }
 .msg.peer .bubble { background: var(--superficie); color: var(--texto); border: 1px solid var(--borde); border-bottom-left-radius: 6px; }
+/* borrado para ambos (v1.12.16): la huella visible no es una burbuja
+   normal — fondo neutro y borde discontinuo, en ambos temas. */
+.msg.me .bubble.eliminado, .msg.peer .bubble.eliminado { background: transparent; border: 1px dashed var(--borde); font-style: italic; }
 .mmeta { display: block; text-align: right; font-size: 11px; opacity: 0.75; margin-top: 4px; font-variant-numeric: tabular-nums; }
 .tick.read { color: #bfe6ff; font-weight: 700; }
 .tick.pending { opacity: 0.75; }
