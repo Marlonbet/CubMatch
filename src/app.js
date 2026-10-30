@@ -1472,21 +1472,33 @@ async function doDislike() {
   }
 }
 
+// Los 4 overlays que cuelgan de #app (match, detalle, ubicación,
+// compartir) repetían crear el div, clase, id, innerHTML y append,
+// y 3 de ellos el mismo cierre al tocar el fondo. Ahora viven en
+// una sola definición; la overlay de llamada queda fuera a
+// propósito: cuelga de document.body y tiene su propio listener.
+// crearOverlay(id, html, alFondo?) → el div ya colgado en #app.
+function crearOverlay(id, html, alFondo) {
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.id = id;
+  ov.innerHTML = html;
+  if (alFondo) ov.addEventListener('click', (e) => { if (e.target === ov) alFondo(); });
+  document.getElementById('app').appendChild(ov);
+  return ov;
+}
+
 function showMatchOverlay(peerPubkey) {
   const prof = S.perfilCache.get(peerPubkey)?.profile;
   const nombre = prof ? prof.apodo : 'alguien';
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
-  ov.id = 'match-overlay';
-  ov.innerHTML = '<div class="sheet match">' +
+  crearOverlay('match-overlay', '<div class="sheet match">' +
     '<div class="big">💘</div><h2>¡Match!</h2>' +
     '<p>A ti y a <b>' + esc(nombre) + '</b> les gustó su perfil.<br>¡Escríbele!</p>' +
     '<div class="match-avatars">' + avatarImg(S.pubkey, S.miPerfil, 'avatar') +
     (prof ? avatarImg(peerPubkey, prof, 'avatar') : '') + '</div>' +
     '<button type="button" class="btn primary big" data-act="match-chatear" data-peer="' + esc(peerPubkey) + '">Chatear ahora</button>' +
     '<button type="button" class="btn ghost" data-act="match-seguir">Seguir descubriendo</button>' +
-    '</div>';
-  document.getElementById("app").appendChild(ov);
+    '</div>');
 }
 
 // ---------- detalle expandido + reportar/bloquear ----------
@@ -1526,18 +1538,13 @@ function detalleCuerpoHTML(peerPubkey) {
 function showDetalle(peerPubkey) {
   const entry = S.perfilCache.get(peerPubkey);
   if (!entry) return;
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
-  ov.id = 'detalle-overlay';
-  ov.innerHTML = '<div class="sheet detalle" role="dialog" aria-label="Detalle del perfil">' +
+  crearOverlay('detalle-overlay', '<div class="sheet detalle" role="dialog" aria-label="Detalle del perfil">' +
     '<button type="button" class="x" data-act="detalle-cerrar" aria-label="Cerrar detalle">✕</button>' +
     detalleCuerpoHTML(peerPubkey) +
     '<div class="row-btns">' +
     '<button type="button" class="btn warn" data-act="perfil-reportar" data-peer="' + esc(peerPubkey) + '">Reportar</button>' +
     '<button type="button" class="btn danger" data-act="perfil-bloquear" data-peer="' + esc(peerPubkey) + '">Bloquear</button>' +
-    '</div></div>';
-  ov.addEventListener('click', (e) => { if (e.target === ov) closeDetalle(); });
-  document.getElementById("app").appendChild(ov);
+    '</div></div>', closeDetalle);
 }
 function closeDetalle() {
   const ov = $('#detalle-overlay');
@@ -2058,10 +2065,7 @@ function showLocConfirm() {
     return;
   }
   closeLocConfirm();
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
-  ov.id = 'loc-overlay';
-  ov.innerHTML = '<div class="sheet loc" role="dialog" aria-label="Compartir ubicación">' +
+  crearOverlay('loc-overlay', '<div class="sheet loc" role="dialog" aria-label="Compartir ubicación">' +
     '<button type="button" class="x" data-act="chat-loc-no" aria-label="Cancelar">✕</button>' +
     '<h3>📍 Compartir ubicación</h3>' +
     '<p>¿Compartir tu ubicación <b>exacta</b> con <b>' + esc(chatPeerNombre()) + '</b>?</p>' +
@@ -2070,9 +2074,7 @@ function showLocConfirm() {
     '<div class="share-btns">' +
     '<button type="button" class="btn primary big" data-act="chat-loc-si">Compartir mi ubicación</button>' +
     '<button type="button" class="btn ghost big" data-act="chat-loc-no">Cancelar</button>' +
-    '</div></div>';
-  ov.addEventListener('click', (e) => { if (e.target === ov) closeLocConfirm(); });
-  document.getElementById('app').appendChild(ov);
+    '</div></div>', closeLocConfirm);
 }
 
 function closeLocConfirm() {
@@ -2924,10 +2926,7 @@ function borrarDatos() {
 function showCompartir() {
   closeCompartir();
   const links = shareLinks();
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
-  ov.id = 'compartir-overlay';
-  ov.innerHTML = '<div class="sheet compartir" role="dialog" aria-label="Compartir CubMatch">' +
+  crearOverlay('compartir-overlay', '<div class="sheet compartir" role="dialog" aria-label="Compartir CubMatch">' +
     '<button type="button" class="x" data-act="compartir-cerrar" aria-label="Cerrar">✕</button>' +
     '<h3>Comparte CubMatch 💘</h3>' +
     '<p class="muted">Invita a tus amigos y familia: mientras más gente se sume, mejores matches para todos.</p>' +
@@ -2938,9 +2937,7 @@ function showCompartir() {
     '<button type="button" class="btn primary big" data-act="compartir-nativo">📤 Compartir…</button>' +
     '<a class="btn wa big" href="' + esc(links.whatsapp) + '" target="_blank" rel="noopener">💬 Compartir por WhatsApp</a>' +
     '<button type="button" class="btn ghost big" data-act="compartir-copiar">📋 Copiar enlace</button>' +
-    '</div></div>';
-  ov.addEventListener('click', (e) => { if (e.target === ov) closeCompartir(); });
-  document.getElementById('app').appendChild(ov);
+    '</div></div>', closeCompartir);
 }
 function closeCompartir() {
   const ov = $('#compartir-overlay');
