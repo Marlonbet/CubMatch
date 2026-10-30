@@ -50,6 +50,15 @@ export function eventoValido(ev) {
   }
 }
 
+// Guarda anti-duplicados de suscripciones (punto 4, ligereza): las 6
+// suscripciones que descartan eventos sin id o ya vistos repetían la
+// guarda + el add. Devuelve true solo para un id nuevo y lo marca visto.
+export function esEventoNuevo(vistos, ev) {
+  if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return false;
+  vistos.add(ev.id);
+  return true;
+}
+
 const EPHEMERAL_MIN = 20000, EPHEMERAL_MAX = 29999;
 
 function randId(prefix) {

@@ -6,7 +6,7 @@
 
 import { fetchUsernameClaim, nombreOcupado } from './cuentas.js';
 import { KIND_PERFIL, TAG_T, parsePerfilEvent } from './cubmatch.js';
-import { eventoValido } from './red.js';
+import { eventoValido, esEventoNuevo } from './red.js';
 
 // ---------- fortaleza de contraseña ----------
 // Puntúa por longitud (>=8, >=12) y variedad de clases
@@ -67,8 +67,7 @@ export async function fetchNetCount(pool, { limit = 500 } = {}) {
       const sub = pool.discovery().subscribe(
         [{ kinds: [KIND_PERFIL], '#t': [TAG_T], limit }],
         (ev) => {
-          if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-          vistos.add(ev.id);
+          if (!esEventoNuevo(vistos, ev)) return;
           eventos.push(ev);
         }
       );

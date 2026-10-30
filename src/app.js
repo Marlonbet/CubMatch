@@ -4,7 +4,7 @@
 
 import { getEventHash } from 'nostr-tools/pure';
 import * as nip04 from 'nostr-tools/nip04';
-import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido, KIND_DM } from './red.js';
+import { RelayPool, RELAYS, ALL_RELAYS, importIdentity, createIdentity, eventoValido, esEventoNuevo, KIND_DM } from './red.js';
 import {
   KIND_CALL, CallSession, buildCallPayload, parseCallPayload,
   videoDisponible, rechazoEntranteVideo, textoRegistroLlamada, fmtDuracion,
@@ -688,8 +688,7 @@ function fetchMyPerfilFrom(client) {
     const sub = client.subscribe(
       [{ kinds: [KIND_PERFIL], authors: [S.pubkey], limit: 1 }],
       (ev) => {
-        if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-        vistos.add(ev.id);
+        if (!esEventoNuevo(vistos, ev)) return;
         if (!eventoValido(ev)) { console.warn('[cubmatch] perfil propio con firma inválida, descartado:', ev.id); return; }
         const p = parsePerfilEvent(ev);
         if (p) best = eventoMasReciente(best, p);

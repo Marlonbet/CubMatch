@@ -20,7 +20,7 @@
 // `discovery` (+ fallback a `messaging` si discovery está degradado y no
 // hubo resultados). Las publicaciones infrecuentes van a los 4 relays.
 
-import { eventoValido } from './red.js';
+import { eventoValido, esEventoNuevo } from './red.js';
 
 export const KIND_PERFIL = 30079;
 export const KIND_LIKE = 7;        // NIP-25: "+" like, "-" dislike
@@ -102,8 +102,7 @@ async function fetchPerfilesFrom(client, { limit = 300, since = 0, includeHidden
   const sub = client.subscribe(
     [filter],
     (ev) => {
-      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-      vistos.add(ev.id);
+      if (!esEventoNuevo(vistos, ev)) return;
       if (!eventoValido(ev)) { console.warn('[cubmatch] perfil con firma inválida, descartado:', ev.id); return; }
       const p = parsePerfilEvent(ev);
       if (!p) return;
@@ -213,8 +212,7 @@ async function fetchLikesFrom(client, myPubkey, { since = 0 } = {}) {
       f({ kinds: [KIND_LIKE], '#a': [myAddr], limit: 500 }),
     ],
     (ev) => {
-      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-      vistos.add(ev.id);
+      if (!esEventoNuevo(vistos, ev)) return;
       if (!eventoValido(ev)) { console.warn('[cubmatch] like con firma inválida, descartado:', ev.id); return; }
       const like = parseLikeEvent(ev, myPubkey);
       if (!like) return;
@@ -378,8 +376,7 @@ async function fetchOneReplaceable(pool, filters) {
   const vistos = new Set();
   const run = (client) => new Promise((resolve) => {
     const sub = client.subscribe(filters, (ev) => {
-      if (!ev || typeof ev.id !== 'string' || vistos.has(ev.id)) return;
-      vistos.add(ev.id);
+      if (!esEventoNuevo(vistos, ev)) return;
       if (!eventoValido(ev)) { console.warn('[cubmatch] evento con firma inválida, descartado:', ev.id); return; }
       best = eventoMasReciente(best, ev);
     });
