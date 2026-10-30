@@ -51,9 +51,11 @@ test('overlay: los 4 overlays de #app viven en una sola definición', () => {
   const app = read('src/app.js');
   assert.equal((app.match(/function crearOverlay\(id, html, alFondo\)/g) || []).length, 1,
     'crearOverlay debe definirse una sola vez');
-  assert.equal((app.match(/crearOverlay\('/g) || []).length, 4,
-    'debe haber 4 sitios de uso: match, detalle, loc, compartir');
-  for (const id of ['match-overlay', 'detalle-overlay', 'loc-overlay', 'compartir-overlay']) {
+  // v1.12.15: un 5º sitio de uso, el aviso anti-fraude de dato sensible,
+  // que pasa por la misma definición única (no es una copia nueva).
+  assert.equal((app.match(/crearOverlay\('/g) || []).length, 5,
+    'debe haber 5 sitios de uso: match, detalle, loc, compartir, dato');
+  for (const id of ['match-overlay', 'detalle-overlay', 'loc-overlay', 'compartir-overlay', 'dato-overlay']) {
     assert.ok(app.includes(`crearOverlay('${id}'`), `falta el sitio ${id}`);
     assert.ok(!app.includes(`ov.id = '${id}'`), `no debe quedar creación suelta de ${id}`);
   }
@@ -61,6 +63,7 @@ test('overlay: los 4 overlays de #app viven en una sola definición', () => {
   assert.ok(app.includes("', closeDetalle);"), 'detalle debe pasar closeDetalle');
   assert.ok(app.includes("', closeLocConfirm);"), 'loc debe pasar closeLocConfirm');
   assert.ok(app.includes("', closeCompartir);"), 'compartir debe pasar closeCompartir');
+  assert.ok(app.includes("', closeDatoConfirm);"), 'dato debe pasar closeDatoConfirm');
   assert.equal((app.match(/ov\.className = 'overlay';/g) || []).length, 1,
     'la clase overlay solo debe asignarse en crearOverlay');
   // La overlay de llamada queda fuera a propósito, intacta.
@@ -99,10 +102,14 @@ test('bundle: el overlay unificado baja de peso sin perder las 4 vistas', () => 
   const bytes = Buffer.byteLength(js);
   // v1.12.12 medido: 207775 B. Con los 4 overlays unificados baja
   // sin cambiar funciones; el tope caza si vuelve alguna copia.
-  assert.ok(bytes < 207775, `el bundle debe bajar de 207775 B, tiene ${bytes}`);
+  // v1.12.15 medido: ~209053 B — el aviso anti-fraude del punto 5
+  // (módulo seguridad + overlay + cableado) añade ~1,9 KB de código
+  // nuevo necesario; la guarda contra copias sigue siendo el conteo
+  // de patrones de arriba.
+  assert.ok(bytes < 210000, `el bundle debe mantenerse por debajo de 210000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
-  for (const id of ['match-overlay', 'detalle-overlay', 'loc-overlay', 'compartir-overlay']) {
+  for (const id of ['match-overlay', 'detalle-overlay', 'loc-overlay', 'compartir-overlay', 'dato-overlay']) {
     assert.ok(js.includes(id), `falta ${id} en el bundle`);
   }
   assert.ok(js.includes('call-overlay'), 'la overlay de llamada debe seguir en el bundle');

@@ -25,6 +25,7 @@ import {
   publishIdentityDocs, migrarInboxSiDesactualizado, sendDMRouted, setInboxStore,
   mergePerfiles, mergeLikes, eventoMasReciente,
 } from './cubmatch.js';
+import { detectarDatoSensible } from './seguridad.js';
 import {
   newProfile, completitud, camposFaltantes, validateProfile, avatarDataURI, MIN_COMPLETITUD,
   fusionarBorrador,
@@ -2038,12 +2039,55 @@ async function submitChat() {
   if (!input || !peer) return;
   const text = input.value.trim();
   if (!text) return;
+  // Punto 5: fricción antes de compartir un dato sensible. El texto
+  // NO se borra todavía: si cancela, lo sigue teniendo para editarlo.
+  const tipo = detectarDatoSensible(text);
+  if (tipo) { showDatoConfirm(tipo, text); return; }
   input.value = '';
   try {
     await sendChatPayload(text);
   } catch {
     // El mensaje ya quedó pintado con "No enviado · reintentar":
     // NO se devuelve el texto al input (se duplicaría al reintentar).
+    toast('No se pudo enviar. Quedó en el chat para reintentar.');
+  }
+}
+
+// Confirmación de dato sensible (mismo patrón que la de ubicación):
+// avisa del riesgo sin acusar a la otra persona y deja enviar igual.
+function showDatoConfirm(tipo, text) {
+  closeDatoConfirm();
+  S.datoPendiente = text;
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : '💸 ¿Hablar de dinero?';
+  const cuerpo = tipo === 'telefono'
+    ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
+      '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
+    : '<p>Tu mensaje parece hablar de <b>dinero, recargas o transferencias</b>. Nunca envíes dinero ni recargas a alguien que conoces solo por la app: es la estafa más común en citas en línea.</p>' +
+      '<p class="muted">Si de verdad quieres seguir con el tema, puedes enviarlo.</p>';
+  crearOverlay('dato-overlay', '<div class="sheet loc" role="dialog" aria-label="Confirmar envío">' +
+    '<button type="button" class="x" data-act="chat-dato-no" aria-label="Cancelar">✕</button>' +
+    '<h3>' + titulo + '</h3>' + cuerpo +
+    '<div class="share-btns">' +
+    '<button type="button" class="btn primary big" data-act="chat-dato-si">Enviar de todos modos</button>' +
+    '<button type="button" class="btn ghost big" data-act="chat-dato-no">Revisar mensaje</button>' +
+    '</div></div>', closeDatoConfirm);
+}
+
+function closeDatoConfirm() {
+  const ov = $('#dato-overlay');
+  if (ov) ov.remove();
+}
+
+async function enviarChatConfirmado() {
+  closeDatoConfirm();
+  const text = S.datoPendiente;
+  S.datoPendiente = null;
+  if (!text || !S.chatPeer) return;
+  const input = $('#chat-input');
+  if (input) input.value = '';
+  try {
+    await sendChatPayload(text);
+  } catch {
     toast('No se pudo enviar. Quedó en el chat para reintentar.');
   }
 }
@@ -3092,6 +3136,8 @@ const ACTIONS = {
   'chat-loc': () => showLocConfirm(),
   'chat-loc-si': () => enviarUbicacion(),
   'chat-loc-no': () => closeLocConfirm(),
+  'chat-dato-si': () => { void enviarChatConfirmado(); },
+  'chat-dato-no': () => { closeDatoConfirm(); const input = $('#chat-input'); if (input) input.focus(); },
   'chat-stickers': () => toggleStickerPanel(),
   'sticker-send': (el) => { if (!S.stickerEdit) enviarSticker(el.dataset.url); },
   'sticker-del': (el) => { removeSticker(LS, S.pubkey, el.dataset.url); renderStickerPanel(); },

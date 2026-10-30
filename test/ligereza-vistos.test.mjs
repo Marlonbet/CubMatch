@@ -86,7 +86,9 @@ test('bundle: la guarda unificada baja de peso sin perder suscripciones', () => 
   const bytes = Buffer.byteLength(js);
   // v1.12.13 medido: 207359 B. Con la guarda unificada baja sin
   // cambiar funciones; el tope caza si vuelve alguna copia.
-  assert.ok(bytes < 207359, `el bundle debe bajar de 207359 B, tiene ${bytes}`);
+  // v1.12.15: el aviso anti-fraude del punto 5 añade ~1,9 KB nuevos;
+  // el tope sube en consecuencia, la guarda sigue siendo el conteo.
+  assert.ok(bytes < 210000, `el bundle debe mantenerse por debajo de 210000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
 });

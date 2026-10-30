@@ -135,8 +135,9 @@ test('bundle: el vivo baja de peso con la deduplicación', () => {
   // alguna copia. v1.12.11 medido: 208.848 B — la corrección de
   // Matches (descarga de likes/perfiles en ambos scopes en paralelo)
   // añade ~74 B de código necesario; la guarda contra copias sigue
-  // siendo el conteo de patrones de arriba.
-  assert.ok(bytes < 209000, `el bundle debe mantenerse por debajo de 209000 B, tiene ${bytes}`);
+  // siendo el conteo de patrones de arriba. v1.12.15 medido:
+  // ~209053 B — el aviso anti-fraude del punto 5 añade ~1,9 KB.
+  assert.ok(bytes < 210000, `el bundle debe mantenerse por debajo de 210000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
 });
