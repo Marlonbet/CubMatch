@@ -2123,10 +2123,13 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
+    : tipo === 'externo'
+    ? '<p>Tu mensaje invita a seguir hablando <b>fuera de CubMatch</b>. Fuera de aquí no hay forma de reportar ni de bloquear con efecto en la app, y es donde más se cuelan los engaños.</p>' +
+      '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres salir, puedes enviarlo.</p>'
     : '<p>Tu mensaje parece hablar de <b>dinero, recargas o transferencias</b>. Nunca envíes dinero ni recargas a alguien que conoces solo por la app: es la estafa más común en citas en línea.</p>' +
       '<p class="muted">Si de verdad quieres seguir con el tema, puedes enviarlo.</p>';
   crearOverlay('dato-overlay', '<div class="sheet loc" role="dialog" aria-label="Confirmar envío">' +

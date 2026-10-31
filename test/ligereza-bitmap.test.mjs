@@ -104,6 +104,9 @@ test('bundle: la lógica de carga aparece una sola vez y el vivo baja de peso', 
   // desempate por id). La guarda contra la copia duplicada sigue siendo
   // el conteo de cadenas de arriba; este tope solo caza crecimientos
   // grandes e injustificados del bundle.
-  assert.ok(bytes < 212000, `el bundle debe mantenerse por debajo de 212000 B, tiene ${bytes}`);
+  // v1.12.17 medido: ~212535 B — el aviso anti-fraude de salir de la
+  // app (punto 5) añade ~650 B de código nuevo necesario; el tope
+  // sube a 213000 B como los demás topes de la era de ligereza.
+  assert.ok(bytes < 213000, `el bundle debe mantenerse por debajo de 213000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
 });

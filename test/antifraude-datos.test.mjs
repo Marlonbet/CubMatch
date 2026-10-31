@@ -1,6 +1,7 @@
-// Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso:
+// Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso y
+// v1.12.17 (invitación a salir de la app):
 // fricción al compartir datos sensibles en el chat. detectarDatoSensible
-// clasifica un mensaje saliente como 'telefono' | 'dinero' | null; la
+// clasifica un mensaje saliente como 'telefono' | 'dinero' | 'externo' | null; la
 // app pide confirmación antes de enviar, sin bloquear nunca el envío.
 // El aviso no acusa a la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -37,6 +38,24 @@ test('dinero: hablar de dinero en general NO dispara', () => {
   assert.equal(detectarDatoSensible('no tengo dinero esta semana'), null);
   assert.equal(detectarDatoSensible('el dinero no compra la felicidad'), null);
   assert.equal(detectarDatoSensible('¿cuánto cuesta el pasaje?'), null);
+});
+
+test('externo: invitación explícita a seguir fuera de la app', () => {
+  assert.equal(detectarDatoSensible('hablemos por WhatsApp mejor'), 'externo');
+  assert.equal(detectarDatoSensible('pasemos a Telegram, aquí es lento'), 'externo');
+  assert.equal(detectarDatoSensible('búscame en Instagram, soy la misma'), 'externo');
+  assert.equal(detectarDatoSensible('escríbeme por Signal cuando puedas'), 'externo');
+  assert.equal(detectarDatoSensible('te paso mi WhatsApp en un rato'), 'externo');
+  assert.equal(detectarDatoSensible('mi Telegram es @juan_cuba'), 'externo');
+  assert.equal(detectarDatoSensible('mi usuario es @maria_habana'), 'externo');
+});
+
+test('externo: preguntar por la red NO dispara, y el número sigue siendo telefono', () => {
+  assert.equal(detectarDatoSensible('¿tienes WhatsApp?'), null);
+  assert.equal(detectarDatoSensible('¿usas Telegram o solo aquí?'), null);
+  assert.equal(detectarDatoSensible('hablemos por aquí mejor'), null);
+  assert.equal(detectarDatoSensible('mi Instagram es bonito, ¿viste mis fotos?'), null);
+  assert.equal(detectarDatoSensible('hablemos por WhatsApp, mi número es 51234567'), 'telefono');
 });
 
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
