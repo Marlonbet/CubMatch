@@ -2123,10 +2123,13 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
+    : tipo === 'codigo'
+    ? '<p>Tu mensaje parece hablar de un <b>código de verificación</b>. Nunca compartas un código que te llegue por SMS o por otra app: con ese código alguien puede entrar a tus cuentas, aunque te diga que es de CubMatch o de soporte.</p>' +
+      '<p class="muted">Ninguna persona real de la app te va a pedir un código. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
     : tipo === 'externo'
     ? '<p>Tu mensaje invita a seguir hablando <b>fuera de CubMatch</b>. Fuera de aquí no hay forma de reportar ni de bloquear con efecto en la app, y es donde más se cuelan los engaños.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres salir, puedes enviarlo.</p>'

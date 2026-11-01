@@ -1,7 +1,7 @@
-// Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso y
-// v1.12.17 (invitación a salir de la app):
+// Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso,
+// v1.12.17 (invitación a salir de la app) y v1.12.18 (códigos):
 // fricción al compartir datos sensibles en el chat. detectarDatoSensible
-// clasifica un mensaje saliente como 'telefono' | 'dinero' | 'externo' | null; la
+// clasifica un mensaje saliente como 'telefono' | 'codigo' | 'dinero' | 'externo' | null; la
 // app pide confirmación antes de enviar, sin bloquear nunca el envío.
 // El aviso no acusa a la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -58,6 +58,23 @@ test('externo: preguntar por la red NO dispara, y el número sigue siendo telefo
   assert.equal(detectarDatoSensible('hablemos por WhatsApp, mi número es 51234567'), 'telefono');
 });
 
+test('codigo: pedir o compartir un código de verificación', () => {
+  assert.equal(detectarDatoSensible('te paso mi código de verificación'), 'codigo');
+  assert.equal(detectarDatoSensible('mi código es 482913'), 'codigo');
+  assert.equal(detectarDatoSensible('pásame el código que te llegó por SMS'), 'codigo');
+  assert.equal(detectarDatoSensible('te mando el código por aquí'), 'codigo');
+  assert.equal(detectarDatoSensible('el código de confirmación es 123456'), 'codigo');
+  assert.equal(detectarDatoSensible('mándame tu código para entrar'), 'codigo');
+});
+
+test('codigo: descuentos, código postal y códigos de puerta NO disparan; el número sigue siendo telefono', () => {
+  assert.equal(detectarDatoSensible('¿tienes código de descuento para el cine?'), null);
+  assert.equal(detectarDatoSensible('mi código postal es 10100'), null);
+  assert.equal(detectarDatoSensible('el código de la puerta es 1234'), null);
+  assert.equal(detectarDatoSensible('hablamos del código del candado luego'), null);
+  assert.equal(detectarDatoSensible('te paso mi código, es 51234567'), 'telefono');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -66,4 +83,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes("data-act=\"chat-dato-no\""), 'debe existir el botón de revisar');
   assert.ok(src.includes("'chat-dato-si'"), 'onAppClick debe atender chat-dato-si');
   assert.ok(src.includes("'chat-dato-no'"), 'onAppClick debe atender chat-dato-no');
+  assert.ok(src.includes('¿Compartir un código?'), 'showDatoConfirm debe tener título para codigo');
 });

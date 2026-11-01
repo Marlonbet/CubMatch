@@ -108,7 +108,7 @@ test('bundle: el overlay unificado baja de peso sin perder las 4 vistas', () => 
   // (módulo seguridad + overlay + cableado) añade ~1,9 KB de código
   // nuevo necesario; la guarda contra copias sigue siendo el conteo
   // de patrones de arriba.
-  assert.ok(bytes < 213000, `el bundle debe mantenerse por debajo de 213000 B, tiene ${bytes}`);
+  assert.ok(bytes < 214000, `el bundle debe mantenerse por debajo de 214000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
   for (const id of ['match-overlay', 'detalle-overlay', 'loc-overlay', 'compartir-overlay', 'dato-overlay', 'borrar-overlay']) {
