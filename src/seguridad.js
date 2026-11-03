@@ -1,9 +1,9 @@
 // Punto 5 (refuerzos contra perfiles falsos y estafas): fricción al
 // compartir datos sensibles en el chat. Detecta, en un mensaje
 // SALIENTE, patrones de número de teléfono, de códigos de
-// verificación, de dinero/recargas y de invitación a seguir fuera
-// de la app, y devuelve
-// 'telefono' | 'codigo' | 'dinero' | 'externo' | null. La app pide confirmación
+// verificación, de contraseñas, de dinero/recargas y de invitación
+// a seguir fuera de la app, y devuelve
+// 'telefono' | 'codigo' | 'clave' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -28,6 +28,12 @@
 //    disparan: no son códigos que den acceso a una cuenta. Un
 //    número de teléfono en el mensaje sigue siendo 'telefono' y
 //    se clasifica antes.
+//  · Clave (v1.12.19): pedir o compartir una contraseña ("mi
+//    contraseña es…", "pásame tu contraseña", "te doy mi clave").
+//    Hablar de una contraseña sin compartirla ni pedirla NO dispara:
+//    "olvidé mi contraseña" o "voy a cambiar mi contraseña" no son
+//    entrega de credenciales. Un número o un código en el mensaje
+//    se clasifican antes, como siempre.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -40,6 +46,11 @@ export function detectarDatoSensible(texto) {
     /mi\s+c[oó]digo\s+(es|:)/i.test(t) ||
     /c[oó]digo\s+que\s+(te\s+)?(lleg[oó]|recibiste)/i.test(t);
   if (codigo) return 'codigo';
+  const clave = /mi\s+(contrase[ñn]a|clave)\s+(es\b|:)/i.test(t) ||
+    /(p[aá]same|m[aá]ndame|env[íi]ame|dime)\b[^.]{0,20}(tu\s+)?(contrase[ñn]a|clave)/i.test(t) ||
+    /(te\s+(paso|doy|mando))\b[^.]{0,20}mi\s+(contrase[ñn]a|clave)/i.test(t) ||
+    /cu[áa]l\s+es\s+tu\s+(contrase[ñn]a|clave)/i.test(t);
+  if (clave) return 'clave';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||
