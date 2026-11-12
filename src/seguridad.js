@@ -1,9 +1,10 @@
 // Punto 5 (refuerzos contra perfiles falsos y estafas): fricción al
 // compartir datos sensibles en el chat. Detecta, en un mensaje
 // SALIENTE, patrones de número de teléfono, de códigos de
-// verificación, de contraseñas, de dinero/recargas y de invitación
-// a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'dinero' | 'externo' | null. La app pide confirmación
+// verificación, de contraseñas, de regalos/paquetes con pago por
+// adelantado, de dinero/recargas y de invitación a seguir fuera de
+// la app, y devuelve
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -34,6 +35,13 @@
 //    "olvidé mi contraseña" o "voy a cambiar mi contraseña" no son
 //    entrega de credenciales. Un número o un código en el mensaje
 //    se clasifican antes, como siempre.
+//  · Regalo (v1.12.20): regalo/paquete/premio JUNTO a un pago por
+//    adelantado para recibirlo (envío, aduana, impuesto, pagar,
+//    tarifa, liberar). Solo el regalo sin pago NO dispara ("te
+//    compré un regalo"), y solo hablar del envío de un paquete
+//    que ya llegó tampoco ("el envío del paquete llegó bien"):
+//    el timo es prometer algo y cobrar antes de entregarlo. Se
+//    clasifica antes que 'dinero'.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -51,6 +59,9 @@ export function detectarDatoSensible(texto) {
     /(te\s+(paso|doy|mando))\b[^.]{0,20}mi\s+(contrase[ñn]a|clave)/i.test(t) ||
     /cu[áa]l\s+es\s+tu\s+(contrase[ñn]a|clave)/i.test(t);
   if (clave) return 'clave';
+  const regalo = /(regalo|paquete|obsequio|premio|encomienda)\b[^.]{0,40}(env[ií]o|aduanas?|impuestos?|pagar|pago|tarifa|costo|liberar)/i.test(t) ||
+    /(aduanas?|impuestos?|pagar|pago|tarifa)\b[^.]{0,40}(regalo|paquete|obsequio|premio|encomienda)/i.test(t);
+  if (regalo) return 'regalo';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||

@@ -1,8 +1,9 @@
 // Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso,
-// v1.12.17 (invitación a salir de la app), v1.12.18 (códigos) y
-// v1.12.19 (contraseñas): fricción al compartir datos sensibles en
+// v1.12.17 (invitación a salir de la app), v1.12.18 (códigos),
+// v1.12.19 (contraseñas) y v1.12.20 (regalo/paquete con pago por
+// adelantado): fricción al compartir datos sensibles en
 // el chat. detectarDatoSensible clasifica un mensaje saliente como
-// 'telefono' | 'codigo' | 'clave' | 'dinero' | 'externo' | null; la
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'dinero' | 'externo' | null; la
 // app pide confirmación antes de enviar, sin bloquear nunca el envío.
 // El aviso no acusa a la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -93,6 +94,28 @@ test('clave: hablar de una contraseña sin compartirla ni pedirla NO dispara; el
   assert.equal(detectarDatoSensible('mi contraseña es 51234567'), 'telefono');
 });
 
+test('regalo: paquete o premio que hay que pagar para recibirlo', () => {
+  assert.equal(detectarDatoSensible('te quiero mandar un regalo, solo tienes que pagar el envío'), 'regalo');
+  assert.equal(detectarDatoSensible('el paquete está en aduana, hay que pagar para liberarlo'), 'regalo');
+  assert.equal(detectarDatoSensible('ganaste un premio, paga los impuestos para recibirlo'), 'regalo');
+  assert.equal(detectarDatoSensible('para recibir el paquete tienes que pagar'), 'regalo');
+  assert.equal(detectarDatoSensible('te mando un obsequio, la tarifa de envío la pagas tú'), 'regalo');
+});
+
+test('regalo: un regalo sin pago, o un envío que ya llegó, NO disparan; el dinero sigue después', () => {
+  assert.equal(detectarDatoSensible('te compré un regalo de cumpleaños'), null);
+  assert.equal(detectarDatoSensible('el envío del paquete llegó bien, gracias'), null);
+  assert.equal(detectarDatoSensible('me llegó un paquete de mi familia'), null);
+  assert.equal(detectarDatoSensible('voy a pagar el pasaje mañana'), null);
+  // Aquí el aviso sale como 'dinero' (el patrón de regalo pide la
+  // palabra de pago DESPUÉS del regalo, o aduana/impuesto/pago
+  // antes; "envío" antes del regalo no basta, para no marcar un
+  // envío que ya llegó). Cuando ambos patrones casan, regalo va
+  // antes que dinero en el código:
+  assert.equal(detectarDatoSensible('mándame dinero para el envío del regalo'), 'dinero');
+  assert.equal(detectarDatoSensible('te mando un regalo, mándame dinero para el envío'), 'regalo');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -103,4 +126,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes("'chat-dato-no'"), 'onAppClick debe atender chat-dato-no');
   assert.ok(src.includes('¿Compartir un código?'), 'showDatoConfirm debe tener título para codigo');
   assert.ok(src.includes('¿Compartir una contraseña?'), 'showDatoConfirm debe tener título para clave');
+  assert.ok(src.includes('¿Pagar por un regalo?'), 'showDatoConfirm debe tener título para regalo');
 });
