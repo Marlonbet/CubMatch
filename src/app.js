@@ -2123,7 +2123,7 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
@@ -2136,6 +2136,9 @@ function showDatoConfirm(tipo, text) {
     : tipo === 'regalo'
     ? '<p>Tu mensaje parece hablar de un <b>regalo o paquete que hay que pagar para recibir</b> (envío, aduana o impuestos). Es un engaño habitual: te prometen un regalo y te piden pagar algo por adelantado para liberarlo, y el regalo nunca llega.</p>' +
       '<p class="muted">Nunca pagues por adelantado para recibir algo de alguien que conoces solo por la app. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
+    : tipo === 'inversion'
+    ? '<p>Tu mensaje parece hablar de una <b>inversión que promete multiplicar tu dinero</b> (duplicarlo, devolver el doble, ganancias seguras o trading y criptomonedas con retorno garantizado). Es un engaño habitual: te prometen ganancias rápidas si inviertes algo, y cuando mandas el dinero desaparecen.</p>' +
+      '<p class="muted">Nadie que conoces solo por la app te va a hacer ganar dinero fácil: si suena demasiado bueno para ser verdad, casi seguro no lo es. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
     : tipo === 'externo'
     ? '<p>Tu mensaje invita a seguir hablando <b>fuera de CubMatch</b>. Fuera de aquí no hay forma de reportar ni de bloquear con efecto en la app, y es donde más se cuelan los engaños.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres salir, puedes enviarlo.</p>'

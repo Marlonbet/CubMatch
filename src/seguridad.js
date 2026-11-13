@@ -2,9 +2,10 @@
 // compartir datos sensibles en el chat. Detecta, en un mensaje
 // SALIENTE, patrones de número de teléfono, de códigos de
 // verificación, de contraseñas, de regalos/paquetes con pago por
-// adelantado, de dinero/recargas y de invitación a seguir fuera de
+// adelantado, de inversiones que prometen multiplicar el dinero,
+// de dinero/recargas y de invitación a seguir fuera de
 // la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'dinero' | 'externo' | null. La app pide confirmación
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'inversion' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -42,6 +43,15 @@
 //    que ya llegó tampoco ("el envío del paquete llegó bien"):
 //    el timo es prometer algo y cobrar antes de entregarlo. Se
 //    clasifica antes que 'dinero'.
+//  · Inversión (v1.12.21): promesa de multiplicar el dinero o
+//    ganancias seguras/garantizadas (duplicar, devolver el doble,
+//    "invierte y gana", trading/cripto con retorno). Hablar de
+//    inversiones sin promesa NO dispara: "invertí en mi negocio",
+//    "¿invertiste en cripto?" o "trabajo en trading" no son ofertas;
+//    "te doy el doble de amor" tampoco (el doble sin dinero ni
+//    plazo no es una promesa de ganancia). Un número, un código
+//    o una clave en el mensaje se clasifican antes, como siempre.
+//    Se clasifica antes que 'dinero'.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -62,6 +72,15 @@ export function detectarDatoSensible(texto) {
   const regalo = /(regalo|paquete|obsequio|premio|encomienda)\b[^.]{0,40}(env[ií]o|aduanas?|impuestos?|pagar|pago|tarifa|costo|liberar)/i.test(t) ||
     /(aduanas?|impuestos?|pagar|pago|tarifa)\b[^.]{0,40}(regalo|paquete|obsequio|premio|encomienda)/i.test(t);
   if (regalo) return 'regalo';
+  const inversion = /(duplic|triplic|multiplic)\w*\b[^.]{0,30}(dinero|plata|inversi[oó]n|ganancia)/i.test(t) ||
+    /te\s+devuelvo\b[^.]{0,20}(el\s+)?(doble|triple)/i.test(t) ||
+    /(te\s+doy)\b[^.]{0,20}(el\s+)?(doble|triple)\b[^.]{0,15}(dinero|plata|lo\s+que|en\s+\d+\s*(horas?|d[ií]as?|semana))/i.test(t) ||
+    /invierte\b[^.]{0,30}(gana|ganancia|devuelvo|doble|triple|retorno|multiplic|duplic)/i.test(t) ||
+    /ganancias?\s+(seguras?|garantizadas?)/i.test(t) ||
+    /(retorno|rendimiento)\s+(garantizado|garantizada|seguro|segura|sin\s+riesgo)/i.test(t) ||
+    /inversi[oó]n\s+(garantizada?|sin\s+riesgo)/i.test(t) ||
+    /(trading|cripto\w*|bitcoin|forex)\b[^.]{0,30}(invierte|invertir|duplica|te\s+devuelvo|retorno)/i.test(t);
+  if (inversion) return 'inversion';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||

@@ -1,9 +1,10 @@
 // Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso,
 // v1.12.17 (invitación a salir de la app), v1.12.18 (códigos),
-// v1.12.19 (contraseñas) y v1.12.20 (regalo/paquete con pago por
-// adelantado): fricción al compartir datos sensibles en
+// v1.12.19 (contraseñas), v1.12.20 (regalo/paquete con pago por
+// adelantado) y v1.12.21 (inversión que promete multiplicar el
+// dinero): fricción al compartir datos sensibles en
 // el chat. detectarDatoSensible clasifica un mensaje saliente como
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'dinero' | 'externo' | null; la
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'inversion' | 'dinero' | 'externo' | null; la
 // app pide confirmación antes de enviar, sin bloquear nunca el envío.
 // El aviso no acusa a la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -116,6 +117,31 @@ test('regalo: un regalo sin pago, o un envío que ya llegó, NO disparan; el din
   assert.equal(detectarDatoSensible('te mando un regalo, mándame dinero para el envío'), 'regalo');
 });
 
+test('inversion: promesa de multiplicar el dinero o ganancias garantizadas', () => {
+  assert.equal(detectarDatoSensible('invierte 100 y te devuelvo el doble'), 'inversion');
+  assert.equal(detectarDatoSensible('te duplico tu dinero en una semana'), 'inversion');
+  assert.equal(detectarDatoSensible('invierte en criptomonedas y gana mucho'), 'inversion');
+  assert.equal(detectarDatoSensible('ganancias seguras con trading, invierte ya'), 'inversion');
+  assert.equal(detectarDatoSensible('inversión garantizada, sin riesgo'), 'inversion');
+  assert.equal(detectarDatoSensible('te doy el triple en 24 horas'), 'inversion');
+  assert.equal(detectarDatoSensible('invierte en bitcoin y duplica tu dinero'), 'inversion');
+  assert.equal(detectarDatoSensible('con bitcoin duplicas tu dinero'), 'inversion');
+  assert.equal(detectarDatoSensible('retorno garantizado si inviertes hoy'), 'inversion');
+});
+
+test('inversion: hablar de inversiones sin promesa NO dispara; el número sigue siendo telefono', () => {
+  assert.equal(detectarDatoSensible('invertí en mi negocio el año pasado'), null);
+  assert.equal(detectarDatoSensible('¿invertiste en criptomonedas?'), null);
+  assert.equal(detectarDatoSensible('trabajo en trading desde hace años'), null);
+  assert.equal(detectarDatoSensible('el bitcoin subió mucho esta semana'), null);
+  assert.equal(detectarDatoSensible('¿qué opinas de las criptomonedas?'), null);
+  assert.equal(detectarDatoSensible('te doy el doble de amor'), null);
+  assert.equal(detectarDatoSensible('te devuelvo el libro mañana'), null);
+  assert.equal(detectarDatoSensible('invierte y te devuelvo el doble, mi número es 51234567'), 'telefono');
+  assert.equal(detectarDatoSensible('te paso mi código, invierte y gana el doble'), 'codigo');
+  assert.equal(detectarDatoSensible('hazme una recarga para invertir'), 'dinero');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -127,4 +153,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Compartir un código?'), 'showDatoConfirm debe tener título para codigo');
   assert.ok(src.includes('¿Compartir una contraseña?'), 'showDatoConfirm debe tener título para clave');
   assert.ok(src.includes('¿Pagar por un regalo?'), 'showDatoConfirm debe tener título para regalo');
+  assert.ok(src.includes('¿Invertir y ganar el doble?'), 'showDatoConfirm debe tener título para inversion');
 });

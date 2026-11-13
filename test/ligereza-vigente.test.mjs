@@ -140,7 +140,7 @@ test('bundle: el vivo baja de peso con la deduplicación', () => {
   // v1.12.16 medido: ~211885 B — el borrado para ambos añade
   // ~2,8 KB. Los seis topes de la era de ligereza suben juntos a
   // 214000 B por la misma razón; la guarda sigue siendo el conteo.
-  assert.ok(bytes < 215000, `el bundle debe mantenerse por debajo de 215000 B, tiene ${bytes}`);
+  assert.ok(bytes < 216000, `el bundle debe mantenerse por debajo de 216000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
 });
