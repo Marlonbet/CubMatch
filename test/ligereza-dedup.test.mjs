@@ -46,7 +46,12 @@ test('bundle con dedup: baja de 218 KB (antes 222,5 KB)', () => {
   js = js.replace('__APP_VERSION__', '1.12.5');
   js = js.split('__TURNMD_APP__').join('').split('__TURNMD_APIKEY__').join('');
   const bytes = Buffer.byteLength(js);
-  assert.ok(bytes < 218000, `esperaba <218000 bytes, son ${bytes}`);
+  // v1.12.22 medido: ~218593 B — el aviso anti-fraude de préstamos
+  // con pago por adelantado (punto 5) añade ~1 KB de código nuevo
+  // necesario; este tope, que mide el bundle sin charset utf8, sube
+  // a 219000 B. La guarda contra la copia duplicada sigue siendo el
+  // test de arriba (una sola copia de @noble/hashes).
+  assert.ok(bytes < 219000, `esperaba <219000 bytes, son ${bytes}`);
   assert.ok(bytes > 150000, `bundle sospechosamente chico: ${bytes} bytes`);
 });
 

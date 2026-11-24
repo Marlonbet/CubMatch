@@ -1,12 +1,14 @@
 // Punto 5 (refuerzos contra perfiles falsos y estafas), primer paso,
 // v1.12.17 (invitación a salir de la app), v1.12.18 (códigos),
 // v1.12.19 (contraseñas), v1.12.20 (regalo/paquete con pago por
-// adelantado) y v1.12.21 (inversión que promete multiplicar el
-// dinero): fricción al compartir datos sensibles en
-// el chat. detectarDatoSensible clasifica un mensaje saliente como
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'inversion' | 'dinero' | 'externo' | null; la
-// app pide confirmación antes de enviar, sin bloquear nunca el envío.
-// El aviso no acusa a la otra persona: solo recuerda el riesgo.
+// adelantado), v1.12.21 (inversión que promete multiplicar el
+// dinero) y v1.12.22 (préstamo con pago por adelantado): fricción
+// al compartir datos sensibles en el chat. detectarDatoSensible
+// clasifica un mensaje saliente como 'telefono' | 'codigo' |
+// 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'dinero' |
+// 'externo' | null; la app pide confirmación antes de enviar,
+// sin bloquear nunca el envío. El aviso no acusa a la otra
+// persona: solo recuerda el riesgo.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -142,6 +144,30 @@ test('inversion: hablar de inversiones sin promesa NO dispara; el número sigue 
   assert.equal(detectarDatoSensible('hazme una recarga para invertir'), 'dinero');
 });
 
+test('prestamo: préstamo o crédito aprobado con pago por adelantado', () => {
+  assert.equal(detectarDatoSensible('tu préstamo fue aprobado, solo paga la comisión para recibirlo'), 'prestamo');
+  assert.equal(detectarDatoSensible('crédito aprobado, deposita la garantía y te lo damos'), 'prestamo');
+  assert.equal(detectarDatoSensible('te ofrezco un préstamo, solo tienes que pagar el seguro por adelantado'), 'prestamo');
+  assert.equal(detectarDatoSensible('te doy un crédito de 5000, primero deposita 200 de garantía'), 'prestamo');
+  assert.equal(detectarDatoSensible('paga la comisión del préstamo para recibirlo'), 'prestamo');
+  assert.equal(detectarDatoSensible('préstamo rápido: activa tu crédito pagando la activación'), 'prestamo');
+  assert.equal(detectarDatoSensible('para recibir el préstamo tienes que pagar el seguro'), 'prestamo');
+});
+
+test('prestamo: hablar de un préstamo sin pago por adelantado NO dispara; teléfono, código y dinero siguen antes', () => {
+  assert.equal(detectarDatoSensible('pedí un préstamo en el banco para comprar una moto'), null);
+  assert.equal(detectarDatoSensible('mi primo me dio un préstamo y le pago en dos meses'), null);
+  assert.equal(detectarDatoSensible('¿me prestas 20 pesos hasta mañana?'), null);
+  assert.equal(detectarDatoSensible('el banco me aprobó un préstamo'), null);
+  assert.equal(detectarDatoSensible('tengo que pagar el préstamo este mes'), null);
+  assert.equal(detectarDatoSensible('te doy un préstamo sin intereses'), null);
+  assert.equal(detectarDatoSensible('mi préstamo tiene un seguro de vida'), null);
+  assert.equal(detectarDatoSensible('tengo un préstamo activo en el banco'), null);
+  assert.equal(detectarDatoSensible('paga la comisión del préstamo, mi número es 51234567'), 'telefono');
+  assert.equal(detectarDatoSensible('te paso mi código, paga la comisión del préstamo'), 'codigo');
+  assert.equal(detectarDatoSensible('hazme una recarga para el préstamo'), 'dinero');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -153,5 +179,6 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Compartir un código?'), 'showDatoConfirm debe tener título para codigo');
   assert.ok(src.includes('¿Compartir una contraseña?'), 'showDatoConfirm debe tener título para clave');
   assert.ok(src.includes('¿Pagar por un regalo?'), 'showDatoConfirm debe tener título para regalo');
+  assert.ok(src.includes('¿Un préstamo con pago por adelantado?'), 'showDatoConfirm debe tener título para prestamo');
   assert.ok(src.includes('¿Invertir y ganar el doble?'), 'showDatoConfirm debe tener título para inversion');
 });

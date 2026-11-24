@@ -2,10 +2,10 @@
 // compartir datos sensibles en el chat. Detecta, en un mensaje
 // SALIENTE, patrones de número de teléfono, de códigos de
 // verificación, de contraseñas, de regalos/paquetes con pago por
-// adelantado, de inversiones que prometen multiplicar el dinero,
-// de dinero/recargas y de invitación a seguir fuera de
-// la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'inversion' | 'dinero' | 'externo' | null. La app pide confirmación
+// adelantado, de préstamos con pago por adelantado, de inversiones
+// que prometen multiplicar el dinero, de dinero/recargas y de
+// invitación a seguir fuera de la app, y devuelve
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -52,6 +52,15 @@
 //    plazo no es una promesa de ganancia). Un número, un código
 //    o una clave en el mensaje se clasifican antes, como siempre.
 //    Se clasifica antes que 'dinero'.
+//  · Préstamo (v1.12.22): préstamo/crédito JUNTO a un pago por
+//    adelantado para recibirlo (comisión, garantía, depósito,
+//    activación, "por adelantado", "para liberarlo"; el seguro
+//    solo si hay que pagarlo o depositarlo). Solo hablar de un
+//    préstamo NO dispara ("pedí un préstamo en el banco",
+//    "el banco me aprobó un préstamo", "mi primo me dio un
+//    préstamo y le pago en dos meses", "mi préstamo tiene un
+//    seguro de vida"): el timo es cobrar antes de dar el dinero.
+//    Se clasifica antes que 'dinero'.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -81,6 +90,11 @@ export function detectarDatoSensible(texto) {
     /inversi[oó]n\s+(garantizada?|sin\s+riesgo)/i.test(t) ||
     /(trading|cripto\w*|bitcoin|forex)\b[^.]{0,30}(invierte|invertir|duplica|te\s+devuelvo|retorno)/i.test(t);
   if (inversion) return 'inversion';
+  const prestamo = /(pr[eé]stamo|cr[eé]dito)\b[^.]{0,50}(comisi[oó]n|garant[ií]a|dep[oó]sito|activaci[oó]n|activar|por\s+adelantado|para\s+liberarlo)/i.test(t) ||
+    /(comisi[oó]n|garant[ií]a|dep[oó]sito|activaci[oó]n|activar|por\s+adelantado|para\s+liberarlo)\b[^.]{0,50}(pr[eé]stamo|cr[eé]dito)/i.test(t) ||
+    /(pr[eé]stamo|cr[eé]dito)\b[^.]{0,50}(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro/i.test(t) ||
+    /(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro\b[^.]{0,40}(pr[eé]stamo|cr[eé]dito)/i.test(t);
+  if (prestamo) return 'prestamo';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||
