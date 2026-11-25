@@ -2,13 +2,14 @@
 // v1.12.17 (invitación a salir de la app), v1.12.18 (códigos),
 // v1.12.19 (contraseñas), v1.12.20 (regalo/paquete con pago por
 // adelantado), v1.12.21 (inversión que promete multiplicar el
-// dinero) y v1.12.22 (préstamo con pago por adelantado): fricción
+// dinero), v1.12.22 (préstamo con pago por adelantado) y v1.12.23
+// (fotos/vídeos íntimos): fricción
 // al compartir datos sensibles en el chat. detectarDatoSensible
 // clasifica un mensaje saliente como 'telefono' | 'codigo' |
-// 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'dinero' |
-// 'externo' | null; la app pide confirmación antes de enviar,
-// sin bloquear nunca el envío. El aviso no acusa a la otra
-// persona: solo recuerda el riesgo.
+// 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' |
+// 'dinero' | 'externo' | null; la app pide confirmación antes
+// de enviar, sin bloquear nunca el envío. El aviso no acusa a
+// la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -168,6 +169,31 @@ test('prestamo: hablar de un préstamo sin pago por adelantado NO dispara; telé
   assert.equal(detectarDatoSensible('hazme una recarga para el préstamo'), 'dinero');
 });
 
+test('intimo: pedir o compartir fotos o vídeos íntimos', () => {
+  assert.equal(detectarDatoSensible('mándame fotos íntimas'), 'intimo');
+  assert.equal(detectarDatoSensible('te mando mis fotos íntimas'), 'intimo');
+  assert.equal(detectarDatoSensible('foto sin ropa, ¿te atreves?'), 'intimo');
+  assert.equal(detectarDatoSensible('quiero verte desnuda'), 'intimo');
+  assert.equal(detectarDatoSensible('quiero verte desnudo esta noche'), 'intimo');
+  assert.equal(detectarDatoSensible('te paso un video íntimo'), 'intimo');
+  assert.equal(detectarDatoSensible('te envío mi video íntimo'), 'intimo');
+  assert.equal(detectarDatoSensible('foto en ropa interior'), 'intimo');
+  assert.equal(detectarDatoSensible('mándame fotos hot'), 'intimo');
+  assert.equal(detectarDatoSensible('muéstrame tu foto desnuda'), 'intimo');
+  assert.equal(detectarDatoSensible('mándame una foto tuya desnuda'), 'intimo');
+});
+
+test('intimo: hablar de fotos o un piropo NO disparan; teléfono y código siguen antes', () => {
+  assert.equal(detectarDatoSensible('¿viste mis fotos?'), null);
+  assert.equal(detectarDatoSensible('foto de mi perro, está hermoso'), null);
+  assert.equal(detectarDatoSensible('fotos de mi viaje a Viñales'), null);
+  assert.equal(detectarDatoSensible('qué sexy te ves hoy'), null);
+  assert.equal(detectarDatoSensible('me encanta esa foto tuya'), null);
+  assert.equal(detectarDatoSensible('mi Instagram es bonito, ¿viste mis fotos?'), null);
+  assert.equal(detectarDatoSensible('mándame fotos íntimas, mi número es 51234567'), 'telefono');
+  assert.equal(detectarDatoSensible('te paso mi código, mándame fotos íntimas'), 'codigo');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -181,4 +207,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Pagar por un regalo?'), 'showDatoConfirm debe tener título para regalo');
   assert.ok(src.includes('¿Un préstamo con pago por adelantado?'), 'showDatoConfirm debe tener título para prestamo');
   assert.ok(src.includes('¿Invertir y ganar el doble?'), 'showDatoConfirm debe tener título para inversion');
+  assert.ok(src.includes('¿Compartir fotos íntimas?'), 'showDatoConfirm debe tener título para intimo');
 });

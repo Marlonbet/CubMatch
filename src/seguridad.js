@@ -3,9 +3,9 @@
 // SALIENTE, patrones de número de teléfono, de códigos de
 // verificación, de contraseñas, de regalos/paquetes con pago por
 // adelantado, de préstamos con pago por adelantado, de inversiones
-// que prometen multiplicar el dinero, de dinero/recargas y de
-// invitación a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'dinero' | 'externo' | null. La app pide confirmación
+// que prometen multiplicar el dinero, de fotos/vídeos íntimos, de
+// dinero/recargas y de invitación a seguir fuera de la app, y devuelve
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -52,6 +52,14 @@
 //    plazo no es una promesa de ganancia). Un número, un código
 //    o una clave en el mensaje se clasifican antes, como siempre.
 //    Se clasifica antes que 'dinero'.
+//  · Íntimo (v1.12.23): pedir o compartir foto/vídeo/imagen íntima
+//    ("mándame fotos íntimas", "foto sin ropa", "quiero verte
+//    desnuda", "video íntimo", "fotos hot"). Requiere el sustantivo
+//    (foto/vídeo/imagen) JUNTO a un calificativo íntimo, o un verbo
+//    de petición/envío junto al sustantivo íntimo. Hablar de fotos
+//    NO dispara ("¿viste mis fotos?", "foto de mi perro", "fotos
+//    de mi viaje"), ni un piropo sin petición de foto ("qué sexy
+//    te ves hoy"). Se clasifica antes que 'dinero'.
 //  · Préstamo (v1.12.22): préstamo/crédito JUNTO a un pago por
 //    adelantado para recibirlo (comisión, garantía, depósito,
 //    activación, "por adelantado", "para liberarlo"; el seguro
@@ -95,6 +103,11 @@ export function detectarDatoSensible(texto) {
     /(pr[eé]stamo|cr[eé]dito)\b[^.]{0,50}(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro/i.test(t) ||
     /(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro\b[^.]{0,40}(pr[eé]stamo|cr[eé]dito)/i.test(t);
   if (prestamo) return 'prestamo';
+  const intimo = /(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,30}(íntim\w*|desnud\w*|sin\s+ropa|ropa\s+interior|hot|er[óo]tic\w*|porno|xxx)/i.test(t) ||
+    /(m[áa]ndame|env[íi]ame|p[áa]same|mu[ée]strame|quiero\s+ver)\b[^.]{0,15}(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes|desnud\w*|íntim\w*)/i.test(t) ||
+    /(te\s+(mando|paso|env[íi]o))\b[^.]{0,30}(mis\s+)?(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,20}(íntim\w*|desnud\w*|sin\s+ropa|ropa\s+interior|hot|er[óo]tic\w*|porno|xxx)/i.test(t) ||
+    /verte\s+(desnud\w*|sin\s+ropa|en\s+ropa\s+interior)/i.test(t);
+  if (intimo) return 'intimo';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||

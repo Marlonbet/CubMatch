@@ -51,7 +51,10 @@ test('bundle con dedup: baja de 218 KB (antes 222,5 KB)', () => {
   // necesario; este tope, que mide el bundle sin charset utf8, sube
   // a 219000 B. La guarda contra la copia duplicada sigue siendo el
   // test de arriba (una sola copia de @noble/hashes).
-  assert.ok(bytes < 219000, `esperaba <219000 bytes, son ${bytes}`);
+  // v1.12.23 medido: ~219605 B — el aviso anti-fraude de fotos y
+  // vídeos íntimos (punto 5) añade ~1 KB de código nuevo
+  // necesario; este tope sube a 220000 B.
+  assert.ok(bytes < 220000, `esperaba <220000 bytes, son ${bytes}`);
   assert.ok(bytes > 150000, `bundle sospechosamente chico: ${bytes} bytes`);
 });
 

@@ -2123,7 +2123,7 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'intimo' ? '📸 ¿Compartir fotos íntimas?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
@@ -2142,6 +2142,9 @@ function showDatoConfirm(tipo, text) {
     : tipo === 'prestamo'
     ? '<p>Tu mensaje parece hablar de un <b>préstamo o crédito que hay que pagar para recibir</b> (comisión, garantía o seguro por adelantado). Es un engaño habitual: te ofrecen un préstamo aprobado y te piden pagar algo antes de darte el dinero, y el dinero nunca llega.</p>' +
       '<p class="muted">Ningún préstamo real te pide pagar para que te lo den. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
+    : tipo === 'intimo'
+    ? '<p>Tu mensaje parece pedir o compartir <b>fotos o vídeos íntimos</b>. Una foto íntima no se puede recuperar una vez enviada, y es el gancho habitual del chantaje: "si no me mandas dinero, publico tus fotos".</p>' +
+      '<p class="muted">Nadie que conoces solo por la app debe presionarte para eso. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
     : tipo === 'externo'
     ? '<p>Tu mensaje invita a seguir hablando <b>fuera de CubMatch</b>. Fuera de aquí no hay forma de reportar ni de bloquear con efecto en la app, y es donde más se cuelan los engaños.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres salir, puedes enviarlo.</p>'
