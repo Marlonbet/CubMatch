@@ -2123,7 +2123,7 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'intimo' ? '📸 ¿Compartir fotos íntimas?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'intimo' ? '📸 ¿Compartir fotos íntimas?' : tipo === 'documento' ? '🪪 ¿Enviar tu documento?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
@@ -2145,6 +2145,9 @@ function showDatoConfirm(tipo, text) {
     : tipo === 'intimo'
     ? '<p>Tu mensaje parece pedir o compartir <b>fotos o vídeos íntimos</b>. Una foto íntima no se puede recuperar una vez enviada, y es el gancho habitual del chantaje: "si no me mandas dinero, publico tus fotos".</p>' +
       '<p class="muted">Nadie que conoces solo por la app debe presionarte para eso. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
+    : tipo === 'documento'
+    ? '<p>Tu mensaje parece pedir o compartir la <b>foto de un documento de identidad</b> (carnet, pasaporte o licencia). Con esa foto alguien puede hacerse pasar por ti, abrir cuentas o pedir préstamos a tu nombre.</p>' +
+      '<p class="muted">Nunca envíes la foto de tu documento a alguien que conoces solo por la app. Si de verdad quieres enviarla, puedes hacerlo.</p>'
     : tipo === 'externo'
     ? '<p>Tu mensaje invita a seguir hablando <b>fuera de CubMatch</b>. Fuera de aquí no hay forma de reportar ni de bloquear con efecto en la app, y es donde más se cuelan los engaños.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres salir, puedes enviarlo.</p>'

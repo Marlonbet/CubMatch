@@ -4,8 +4,9 @@
 // verificación, de contraseñas, de regalos/paquetes con pago por
 // adelantado, de préstamos con pago por adelantado, de inversiones
 // que prometen multiplicar el dinero, de fotos/vídeos íntimos, de
-// dinero/recargas y de invitación a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'dinero' | 'externo' | null. La app pide confirmación
+// fotos de documentos de identidad, de dinero/recargas y de
+// invitación a seguir fuera de la app, y devuelve
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -60,6 +61,16 @@
 //    NO dispara ("¿viste mis fotos?", "foto de mi perro", "fotos
 //    de mi viaje"), ni un piropo sin petición de foto ("qué sexy
 //    te ves hoy"). Se clasifica antes que 'dinero'.
+//  · Documento (v1.12.24): pedir o compartir la foto de un
+//    documento de identidad ("te mando la foto de mi carnet",
+//    "mándame la foto de tu pasaporte", "te paso mi licencia").
+//    Requiere el sustantivo foto/vídeo/imagen JUNTO al documento,
+//    o un verbo de petición/envío junto al documento. Hablar de
+//    un documento sin enviarlo NO dispara ("mi pasaporte está
+//    vencido", "mi carnet se me perdió", "¿tienes pasaporte?").
+//    Se clasifica antes que 'intimo': pedir la foto del carnet
+//    no es una foto íntima, y el aviso de 'intimo' hablaría de
+//    chantaje con fotos, que no es el riesgo aquí.
 //  · Préstamo (v1.12.22): préstamo/crédito JUNTO a un pago por
 //    adelantado para recibirlo (comisión, garantía, depósito,
 //    activación, "por adelantado", "para liberarlo"; el seguro
@@ -103,6 +114,9 @@ export function detectarDatoSensible(texto) {
     /(pr[eé]stamo|cr[eé]dito)\b[^.]{0,50}(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro/i.test(t) ||
     /(pagar|paga|deposit\w*)\b[^.]{0,25}(el\s+)?seguro\b[^.]{0,40}(pr[eé]stamo|cr[eé]dito)/i.test(t);
   if (prestamo) return 'prestamo';
+  const documento = /(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,30}(carnet|pasaporte|licencia|documento|c[ée]dula|identidad)/i.test(t) ||
+    /(m[áa]ndame|env[íi]ame|p[áa]same|mu[ée]strame|te\s+(mando|paso|env[íi]o))\b[^.]{0,25}(mi\s+|tu\s+)?(carnet|pasaporte|licencia|c[ée]dula|documento)/i.test(t);
+  if (documento) return 'documento';
   const intimo = /(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,30}(íntim\w*|desnud\w*|sin\s+ropa|ropa\s+interior|hot|er[óo]tic\w*|porno|xxx)/i.test(t) ||
     /(m[áa]ndame|env[íi]ame|p[áa]same|mu[ée]strame|quiero\s+ver)\b[^.]{0,15}(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes|desnud\w*|íntim\w*)/i.test(t) ||
     /(te\s+(mando|paso|env[íi]o))\b[^.]{0,30}(mis\s+)?(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,20}(íntim\w*|desnud\w*|sin\s+ropa|ropa\s+interior|hot|er[óo]tic\w*|porno|xxx)/i.test(t) ||

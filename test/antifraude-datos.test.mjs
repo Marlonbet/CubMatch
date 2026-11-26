@@ -2,12 +2,13 @@
 // v1.12.17 (invitación a salir de la app), v1.12.18 (códigos),
 // v1.12.19 (contraseñas), v1.12.20 (regalo/paquete con pago por
 // adelantado), v1.12.21 (inversión que promete multiplicar el
-// dinero), v1.12.22 (préstamo con pago por adelantado) y v1.12.23
-// (fotos/vídeos íntimos): fricción
+// dinero), v1.12.22 (préstamo con pago por adelantado), v1.12.23
+// (fotos/vídeos íntimos) y v1.12.24 (foto de un documento de
+// identidad): fricción
 // al compartir datos sensibles en el chat. detectarDatoSensible
 // clasifica un mensaje saliente como 'telefono' | 'codigo' |
 // 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' |
-// 'dinero' | 'externo' | null; la app pide confirmación antes
+// 'documento' | 'dinero' | 'externo' | null; la app pide confirmación antes
 // de enviar, sin bloquear nunca el envío. El aviso no acusa a
 // la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -194,6 +195,27 @@ test('intimo: hablar de fotos o un piropo NO disparan; teléfono y código sigue
   assert.equal(detectarDatoSensible('te paso mi código, mándame fotos íntimas'), 'codigo');
 });
 
+test('documento: pedir o compartir la foto de un documento de identidad', () => {
+  assert.equal(detectarDatoSensible('te mando la foto de mi carnet'), 'documento');
+  assert.equal(detectarDatoSensible('mándame la foto de tu pasaporte'), 'documento');
+  assert.equal(detectarDatoSensible('te paso mi licencia de conducir'), 'documento');
+  assert.equal(detectarDatoSensible('foto de mi documento de identidad'), 'documento');
+  assert.equal(detectarDatoSensible('te envío una imagen de mi cédula'), 'documento');
+  assert.equal(detectarDatoSensible('te mando mi documento para que veas que soy yo'), 'documento');
+  assert.equal(detectarDatoSensible('muéstrame tu carnet por favor'), 'documento');
+});
+
+test('documento: hablar de un documento sin enviarlo NO dispara; teléfono, código e íntimo siguen antes', () => {
+  assert.equal(detectarDatoSensible('mi pasaporte está vencido, tengo que renovarlo'), null);
+  assert.equal(detectarDatoSensible('mi carnet se me perdió en el parque'), null);
+  assert.equal(detectarDatoSensible('¿tienes pasaporte vigente?'), null);
+  assert.equal(detectarDatoSensible('foto de mi perro, está hermoso'), null);
+  assert.equal(detectarDatoSensible('te mando la foto de mi carnet, mi número es 51234567'), 'telefono');
+  assert.equal(detectarDatoSensible('te paso mi código, te mando la foto de mi pasaporte'), 'codigo');
+  assert.equal(detectarDatoSensible('mándame fotos íntimas'), 'intimo');
+  assert.equal(detectarDatoSensible('mándame la foto de tu carnet'), 'documento');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -208,4 +230,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Un préstamo con pago por adelantado?'), 'showDatoConfirm debe tener título para prestamo');
   assert.ok(src.includes('¿Invertir y ganar el doble?'), 'showDatoConfirm debe tener título para inversion');
   assert.ok(src.includes('¿Compartir fotos íntimas?'), 'showDatoConfirm debe tener título para intimo');
+  assert.ok(src.includes('¿Enviar tu documento?'), 'showDatoConfirm debe tener título para documento');
 });

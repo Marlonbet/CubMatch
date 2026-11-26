@@ -66,7 +66,7 @@ test('bundle: la tarjeta unificada baja de peso sin perder las dos variantes', (
   // sin cambiar funciones; el tope caza si vuelve alguna copia.
   // v1.12.15: el aviso anti-fraude del punto 5 añade ~1,9 KB nuevos;
   // el tope sube en consecuencia, la guarda sigue siendo el conteo.
-  assert.ok(bytes < 218000, `el bundle debe mantenerse por debajo de 218000 B, tiene ${bytes}`);
+  assert.ok(bytes < 220000, `el bundle debe mantenerse por debajo de 220000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
   assert.ok(!js.includes('__APP_VERSION__'), 'sin placeholders sin reemplazar');
   assert.ok(js.includes('grid-card'), 'la variante de cuadrícula debe seguir en el bundle');
