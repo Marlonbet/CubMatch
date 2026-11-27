@@ -3,12 +3,13 @@
 // v1.12.19 (contraseñas), v1.12.20 (regalo/paquete con pago por
 // adelantado), v1.12.21 (inversión que promete multiplicar el
 // dinero), v1.12.22 (préstamo con pago por adelantado), v1.12.23
-// (fotos/vídeos íntimos) y v1.12.24 (foto de un documento de
-// identidad): fricción
+// (fotos/vídeos íntimos), v1.12.24 (foto de un documento de
+// identidad) y v1.12.25 (enlace que invita a abrirlo, phishing):
+// fricción
 // al compartir datos sensibles en el chat. detectarDatoSensible
 // clasifica un mensaje saliente como 'telefono' | 'codigo' |
 // 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' |
-// 'documento' | 'dinero' | 'externo' | null; la app pide confirmación antes
+// 'documento' | 'dinero' | 'enlace' | 'externo' | null; la app pide confirmación antes
 // de enviar, sin bloquear nunca el envío. El aviso no acusa a
 // la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -216,6 +217,30 @@ test('documento: hablar de un documento sin enviarlo NO dispara; teléfono, cód
   assert.equal(detectarDatoSensible('mándame la foto de tu carnet'), 'documento');
 });
 
+test('enlace: un enlace que invita a abrirlo o a verificar la cuenta', () => {
+  assert.equal(detectarDatoSensible('entra a este enlace para ver mis fotos https://ejemplo.com/fotos'), 'enlace');
+  assert.equal(detectarDatoSensible('abre este link https://ejemplo.com/perfil'), 'enlace');
+  assert.equal(detectarDatoSensible('haz clic aquí https://ejemplo.com/verificar'), 'enlace');
+  assert.equal(detectarDatoSensible('verifica tu cuenta aquí: https://cubmatch-seguro.com/login'), 'enlace');
+  assert.equal(detectarDatoSensible('confirma tu perfil en este enlace https://ejemplo.com/confirmar'), 'enlace');
+  assert.equal(detectarDatoSensible('te mando el link de mi perfil https://ejemplo.com/yo'), 'enlace');
+  assert.equal(detectarDatoSensible('mira mis fotos en este enlace https://ejemplo.com/fotos'), 'enlace');
+  assert.equal(detectarDatoSensible('mira este video, está en el link https://bit.ly/abc123'), 'enlace');
+  assert.equal(detectarDatoSensible('te paso el enlace, es bit.ly/abc123'), 'enlace');
+});
+
+test('enlace: compartir un enlace sin invitación NO dispara; teléfono, código, íntimo, documento y dinero siguen antes', () => {
+  assert.equal(detectarDatoSensible('te paso el video de YouTube https://youtu.be/abc123'), null);
+  assert.equal(detectarDatoSensible('mira este video https://youtube.com/watch?v=abc123'), null);
+  assert.equal(detectarDatoSensible('mi Instagram es https://instagram.com/miusuario'), null);
+  assert.equal(detectarDatoSensible('entra a mi Instagram, ahí están mis fotos'), null);
+  assert.equal(detectarDatoSensible('hablemos por WhatsApp, mi grupo es https://chat.whatsapp.com/abc123'), 'externo');
+  assert.equal(detectarDatoSensible('mándame dinero, entra a este link https://ejemplo.com/pago'), 'dinero');
+  assert.equal(detectarDatoSensible('mándame la foto de tu carnet por este enlace https://ejemplo.com/subir'), 'documento');
+  assert.equal(detectarDatoSensible('mándame fotos íntimas, están en este link https://ejemplo.com/fotos'), 'intimo');
+  assert.equal(detectarDatoSensible('te paso mi código, entra a este enlace https://ejemplo.com'), 'codigo');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -231,4 +256,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Invertir y ganar el doble?'), 'showDatoConfirm debe tener título para inversion');
   assert.ok(src.includes('¿Compartir fotos íntimas?'), 'showDatoConfirm debe tener título para intimo');
   assert.ok(src.includes('¿Enviar tu documento?'), 'showDatoConfirm debe tener título para documento');
+  assert.ok(src.includes('¿Abrir ese enlace?'), 'showDatoConfirm debe tener título para enlace');
 });

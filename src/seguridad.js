@@ -4,9 +4,10 @@
 // verificación, de contraseñas, de regalos/paquetes con pago por
 // adelantado, de préstamos con pago por adelantado, de inversiones
 // que prometen multiplicar el dinero, de fotos/vídeos íntimos, de
-// fotos de documentos de identidad, de dinero/recargas y de
+// fotos de documentos de identidad, de enlaces que invitan a
+// abrirlos (phishing), de dinero/recargas y de
 // invitación a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'externo' | null. La app pide confirmación
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'enlace' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -80,6 +81,18 @@
 //    préstamo y le pago en dos meses", "mi préstamo tiene un
 //    seguro de vida"): el timo es cobrar antes de dar el dinero.
 //    Se clasifica antes que 'dinero'.
+//  · Enlace (v1.12.25): un enlace (http/https, www. o acortador)
+//    JUNTO a una invitación a abrirlo ("entra a este enlace",
+//    "verifica tu cuenta aquí", "te mando el link", "mira mis
+//    fotos en este enlace") o un acortador solo (el destino va
+//    oculto: bit.ly, tinyurl, t.co). Compartir un enlace sin
+//    invitación NO dispara ("te paso el video https://…",
+//    "mira este video https://…", "mi Instagram es https://…"),
+//    y tampoco una invitación sin enlace ("entra a mi Instagram").
+//    Un número, un código, una clave, un documento o una foto
+//    íntima en el mensaje se clasifican antes, como siempre.
+//    Se clasifica antes que 'externo' y después que 'dinero':
+//    si el mensaje pide dinero, el aviso de dinero manda.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -128,6 +141,14 @@ export function detectarDatoSensible(texto) {
     /env[íi]ame\s+(dinero|saldo)/i.test(t) ||
     /n[úu]mero\s+de\s+tarjeta/i.test(t);
   if (dinero) return 'dinero';
+  const acortado = /\b(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|shorte\.st|tiny\.cc)\/\S+/i.test(t);
+  const tieneUrl = /(https?:\/\/|www\.)[^\s]+/i.test(t) || acortado;
+  const enlace = tieneUrl && (acortado ||
+    /(verifica|confirma|activa)\b[^.]{0,30}(tu\s+)?(cuenta|perfil|identidad)/i.test(t) ||
+    /(entra|abre|haz\s+clic|pincha)\b[^.]{0,25}(este|esta|el|al|en\s+el)?\s*(enlace|link|aqu[íi])/i.test(t) ||
+    /(mira|ve)\b[^.]{0,20}(mis\s+)?(fotos?|v[íi]deos?)\b[^.]{0,20}(aqu[íi]|en\s+este|en\s+el)\s*(enlace|link)/i.test(t) ||
+    /(te\s+(mando|paso|env[íi]o))\b[^.]{0,15}(el\s+)?(enlace|link)/i.test(t));
+  if (enlace) return 'enlace';
   const externo = /(hablemos|pasemos|sigamos|escr[íi]beme|b[úu]scame|agr[ée]game|te\s+(paso|doy|mando)|p[áa]same\s+tu)\b[^.]{0,24}(whatsapp|telegram|instagram|facebook|signal|\big\b)/i.test(t) ||
     /mi\s+(whatsapp|telegram|instagram|facebook)\b[^@]{0,20}@/i.test(t) ||
     /mi\s+usuario\b[^@]{0,20}@/i.test(t);
