@@ -125,6 +125,9 @@ test('bundle: la lógica de carga aparece una sola vez y el vivo baja de peso', 
   // v1.12.26 medido: 220821 B — el aviso anti-fraude de la propuesta
   // de quedar en persona (punto 5) añade ~1,2 KB de código nuevo
   // necesario; los 7 topes suben juntos a 221000 B.
-  assert.ok(bytes < 221000, `el bundle debe mantenerse por debajo de 221000 B, tiene ${bytes}`);
+  // v1.12.27 medido: 222084 B — el aviso anti-fraude de pedir dinero
+  // para una emergencia (punto 5) añade ~1,3 KB de código nuevo
+  // necesario; los 7 topes suben juntos a 223000 B.
+  assert.ok(bytes < 223000, `el bundle debe mantenerse por debajo de 223000 B, tiene ${bytes}`);
   assert.ok(js.includes('__cubmatchApp'), 'falta la app en el bundle');
 });

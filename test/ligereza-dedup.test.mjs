@@ -59,7 +59,9 @@ test('bundle con dedup: baja de 218 KB (antes 222,5 KB)', () => {
   // a 222000 B.
   // v1.12.26 medido: 222596 B — el aviso anti-fraude de la propuesta
   // de quedar en persona añade ~1,2 KB; este tope sube a 223000 B.
-  assert.ok(bytes < 223000, `esperaba <223000 bytes, son ${bytes}`);
+  // v1.12.27 medido: 223876 B — el aviso anti-fraude de pedir dinero
+  // para una emergencia añade ~1,3 KB; este tope sube a 224000 B.
+  assert.ok(bytes < 224000, `esperaba <224000 bytes, son ${bytes}`);
   assert.ok(bytes > 150000, `bundle sospechosamente chico: ${bytes} bytes`);
 });
 

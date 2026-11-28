@@ -4,13 +4,15 @@
 // adelantado), v1.12.21 (inversión que promete multiplicar el
 // dinero), v1.12.22 (préstamo con pago por adelantado), v1.12.23
 // (fotos/vídeos íntimos), v1.12.24 (foto de un documento de
-// identidad), v1.12.25 (enlace que invita a abrirlo, phishing) y
-// v1.12.26 (propuesta de quedar en persona, encuentro):
+// identidad), v1.12.25 (enlace que invita a abrirlo, phishing),
+// v1.12.26 (propuesta de quedar en persona, encuentro) y
+// v1.12.27 (pedir dinero para una emergencia, el guion clásico
+// de la estafa romántica):
 // fricción
 // al compartir datos sensibles en el chat. detectarDatoSensible
 // clasifica un mensaje saliente como 'telefono' | 'codigo' |
 // 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' |
-// 'documento' | 'dinero' | 'encuentro' | 'enlace' | 'externo' | null; la app pide confirmación antes
+// 'documento' | 'emergencia' | 'dinero' | 'encuentro' | 'enlace' | 'externo' | null; la app pide confirmación antes
 // de enviar, sin bloquear nunca el envío. El aviso no acusa a
 // la otra persona: solo recuerda el riesgo.
 import test from 'node:test';
@@ -272,6 +274,33 @@ test('encuentro: dinero e íntimo mandan antes; encuentro antes que enlace', () 
   assert.equal(detectarDatoSensible('nos vemos mañana, entra a este enlace https://ejemplo.com/x'), 'encuentro');
 });
 
+test('emergencia: pedir dinero para una emergencia médica o familiar', () => {
+  assert.equal(detectarDatoSensible('mi mamá está en el hospital, necesito dinero para la operación'), 'emergencia');
+  assert.equal(detectarDatoSensible('tuve un accidente, necesito ayuda para pagar el hospital'), 'emergencia');
+  assert.equal(detectarDatoSensible('necesito dinero, mi abuelo está enfermo y hay que operarlo'), 'emergencia');
+  assert.equal(detectarDatoSensible('mándame dinero para el funeral de mi papá'), 'emergencia');
+  assert.equal(detectarDatoSensible('préstame plata, mi hijo está internado'), 'emergencia');
+  assert.equal(detectarDatoSensible('no tengo para la medicina de mi mamá'), 'emergencia');
+  assert.equal(detectarDatoSensible('ayúdame con la operación de mi mamá, no tengo dinero'), 'emergencia');
+  assert.equal(detectarDatoSensible('me falta plata para la ambulancia, por favor'), 'emergencia');
+});
+
+test('emergencia: una emergencia sin pedir dinero, o pedir dinero sin emergencia, NO disparan', () => {
+  assert.equal(detectarDatoSensible('mi mamá está en el hospital, estoy muy triste'), null);
+  assert.equal(detectarDatoSensible('necesito dinero para el pasaje'), null);
+  assert.equal(detectarDatoSensible('trabajo en un hospital'), null);
+  assert.equal(detectarDatoSensible('tuve un accidente el año pasado, ya estoy bien'), null);
+  assert.equal(detectarDatoSensible('mi abuela murió, el funeral es mañana'), null);
+  assert.equal(detectarDatoSensible('no tengo dinero esta semana'), null);
+});
+
+test('emergencia: manda antes que dinero; código, regalo e íntimo siguen antes', () => {
+  assert.equal(detectarDatoSensible('mándame dinero para la operación de mi mamá'), 'emergencia');
+  assert.equal(detectarDatoSensible('mi código es 482913, mi mamá está en el hospital y necesito dinero'), 'codigo');
+  assert.equal(detectarDatoSensible('te mando un regalo, mándame dinero para el envío'), 'regalo');
+  assert.equal(detectarDatoSensible('mándame fotos íntimas, mi mamá está en el hospital'), 'intimo');
+});
+
 test('cableado: app.js pide confirmación antes de enviar un dato sensible', () => {
   const src = readFileSync(new URL('../src/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("from './seguridad.js'"), 'app.js debe importar detectarDatoSensible');
@@ -289,4 +318,5 @@ test('cableado: app.js pide confirmación antes de enviar un dato sensible', () 
   assert.ok(src.includes('¿Enviar tu documento?'), 'showDatoConfirm debe tener título para documento');
   assert.ok(src.includes('¿Abrir ese enlace?'), 'showDatoConfirm debe tener título para enlace');
   assert.ok(src.includes('¿Quedaron en verse en persona?'), 'showDatoConfirm debe tener título para encuentro');
+  assert.ok(src.includes('¿Dinero para una emergencia?'), 'showDatoConfirm debe tener título para emergencia');
 });

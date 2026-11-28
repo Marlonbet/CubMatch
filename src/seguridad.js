@@ -6,9 +6,11 @@
 // que prometen multiplicar el dinero, de fotos/vídeos íntimos, de
 // fotos de documentos de identidad, de enlaces que invitan a
 // abrirlos (phishing), de propuestas de quedar en persona
-// (encuentro), de dinero/recargas y de
+// (encuentro), de pedir dinero para una emergencia (hospital,
+// operación, accidente: el guion clásico de la estafa romántica),
+// de dinero/recargas y de
 // invitación a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'encuentro' | 'enlace' | 'externo' | null. La app pide confirmación
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'emergencia' | 'dinero' | 'encuentro' | 'enlace' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -107,6 +109,18 @@
 //    nos vimos en el parque"). Se clasifica después de 'dinero'
 //    y antes de 'enlace': si el mensaje pide dinero, el aviso de
 //    dinero manda, que es el riesgo más agudo.
+//  · Emergencia (v1.12.27): pedir dinero para una emergencia
+//    médica o familiar: una palabra de emergencia (hospital,
+//    operación, accidente, enfermo, medicina, funeral, urgencia,
+//    internado, ambulancia) JUNTO a una petición de dinero o
+//    ayuda ("necesito dinero", "me falta plata", "no tengo para",
+//    "préstame", "ayúdame con", "mándame dinero"), en cualquier
+//    orden. Hablar de una emergencia sin pedir dinero NO dispara
+//    ("mi mamá está en el hospital, estoy triste"), ni pedir
+//    dinero sin emergencia ("necesito dinero para el pasaje").
+//    Se clasifica antes que 'dinero': si el mensaje pide dinero
+//    para una emergencia, el aviso de emergencia manda, que es
+//    el guion concreto de la estafa.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -149,6 +163,9 @@ export function detectarDatoSensible(texto) {
     /(te\s+(mando|paso|env[íi]o))\b[^.]{0,30}(mis\s+)?(foto|fotos|v[íi]deo|v[íi]deos|imagen|im[áa]genes)\b[^.]{0,20}(íntim\w*|desnud\w*|sin\s+ropa|ropa\s+interior|hot|er[óo]tic\w*|porno|xxx)/i.test(t) ||
     /verte\s+(desnud\w*|sin\s+ropa|en\s+ropa\s+interior)/i.test(t);
   if (intimo) return 'intimo';
+  const emergencia = /(hospital|operaci[oó]n|accidente|enferm\w*|medicina|medicamento\w*|funeral|entierro|urgencia|emergencia|internad\w*|ambulancia)\b[^.]{0,50}(necesito\s+(dinero|plata|ayuda)|me\s+falta\s+(dinero|plata)|no\s+tengo\s+para|pr[ée]stame|ay[uú]dame\s+con|m[áa]ndame\s+(dinero|plata|ayuda)|env[íi]ame\s+(dinero|plata|ayuda)|necesito\s+ayuda)/i.test(t) ||
+    /(necesito\s+(dinero|plata|ayuda)|me\s+falta\s+(dinero|plata)|no\s+tengo\s+para|pr[ée]stame|ay[uú]dame\s+con|m[áa]ndame\s+(dinero|plata|ayuda)|env[íi]ame\s+(dinero|plata|ayuda)|necesito\s+ayuda)\b[^.]{0,50}(hospital|operaci[oó]n|accidente|enferm\w*|medicina|medicamento\w*|funeral|entierro|urgencia|emergencia|internad\w*|ambulancia)/i.test(t);
+  if (emergencia) return 'emergencia';
   const dinero = /recarg/i.test(t) ||
     /transf/i.test(t) ||
     /m[áa]ndame\s+(dinero|saldo|recarga|transferencia)/i.test(t) ||

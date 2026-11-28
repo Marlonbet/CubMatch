@@ -2123,7 +2123,7 @@ async function submitChat() {
 function showDatoConfirm(tipo, text) {
   closeDatoConfirm();
   S.datoPendiente = text;
-  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'intimo' ? '📸 ¿Compartir fotos íntimas?' : tipo === 'documento' ? '🪪 ¿Enviar tu documento?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : tipo === 'encuentro' ? '📍 ¿Quedaron en verse en persona?' : tipo === 'enlace' ? '🔗 ¿Abrir ese enlace?' : '💸 ¿Hablar de dinero?';
+  const titulo = tipo === 'telefono' ? '📱 ¿Enviar este número?' : tipo === 'clave' ? '🔑 ¿Compartir una contraseña?' : tipo === 'codigo' ? '🔐 ¿Compartir un código?' : tipo === 'regalo' ? '🎁 ¿Pagar por un regalo?' : tipo === 'prestamo' ? '💳 ¿Un préstamo con pago por adelantado?' : tipo === 'intimo' ? '📸 ¿Compartir fotos íntimas?' : tipo === 'documento' ? '🪪 ¿Enviar tu documento?' : tipo === 'inversion' ? '📈 ¿Invertir y ganar el doble?' : tipo === 'externo' ? '↗️ ¿Salir de CubMatch?' : tipo === 'encuentro' ? '📍 ¿Quedaron en verse en persona?' : tipo === 'emergencia' ? '🚨 ¿Dinero para una emergencia?' : tipo === 'enlace' ? '🔗 ¿Abrir ese enlace?' : '💸 ¿Hablar de dinero?';
   const cuerpo = tipo === 'telefono'
     ? '<p>Estás a punto de compartir un <b>número de teléfono</b> con alguien que conoces solo por la app. Con tu número, esa persona puede encontrarte fuera de CubMatch.</p>' +
       '<p class="muted">Si prefieres, sigue hablando aquí dentro. Si de verdad quieres compartirlo, puedes enviarlo.</p>'
@@ -2151,6 +2151,9 @@ function showDatoConfirm(tipo, text) {
     : tipo === 'encuentro'
     ? '<p>Tu mensaje parece proponer <b>quedar en persona</b>. Para un primer encuentro, mejor un lugar público con gente y de día si se puede.</p>' +
       '<p class="muted">Avisa a un familiar o amistad dónde, cuándo y con quién vas. No compartas la dirección de tu casa ni dejes que te recojan en la puerta, y recuerda que puedes irte cuando quieras. Si insiste en un lugar privado o en ir a tu casa, es una señal de alerta. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
+    : tipo === 'emergencia'
+    ? '<p>Tu mensaje parece pedir dinero para una <b>emergencia</b> (un familiar en el hospital, un accidente, una operación). Es el guion más común de la estafa romántica: alguien que acabas de conocer te cuenta una desgracia urgente y te pide dinero para resolverla; cuando lo mandas, desaparece o pide más.</p>' +
+      '<p class="muted">Una emergencia real no se resuelve mandando dinero a alguien que conoces solo por la app. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
     : tipo === 'enlace'
     ? '<p>Tu mensaje incluye un <b>enlace y te invita a abrirlo</b>. Un enlace puede llevar a una página falsa que imita a CubMatch o a otra app para robar tu cuenta o tus fotos.</p>' +
       '<p class="muted">Nunca escribas tu contraseña ni un código en una página a la que llegaste por un enlace del chat. Si de verdad quieres enviarlo, puedes hacerlo.</p>'
