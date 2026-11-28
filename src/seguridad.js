@@ -5,9 +5,10 @@
 // adelantado, de préstamos con pago por adelantado, de inversiones
 // que prometen multiplicar el dinero, de fotos/vídeos íntimos, de
 // fotos de documentos de identidad, de enlaces que invitan a
-// abrirlos (phishing), de dinero/recargas y de
+// abrirlos (phishing), de propuestas de quedar en persona
+// (encuentro), de dinero/recargas y de
 // invitación a seguir fuera de la app, y devuelve
-// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'enlace' | 'externo' | null. La app pide confirmación
+// 'telefono' | 'codigo' | 'clave' | 'regalo' | 'prestamo' | 'inversion' | 'intimo' | 'documento' | 'dinero' | 'encuentro' | 'enlace' | 'externo' | null. La app pide confirmación
 // antes de enviar (nunca bloquea: el usuario puede enviar de todos
 // modos). Es fricción, no acusación: el texto del aviso no dice que
 // la otra persona sea estafadora, solo recuerda el riesgo.
@@ -93,6 +94,19 @@
 //    íntima en el mensaje se clasifican antes, como siempre.
 //    Se clasifica antes que 'externo' y después que 'dinero':
 //    si el mensaje pide dinero, el aviso de dinero manda.
+//  · Encuentro (v1.12.26): propuesta concreta de verse en persona:
+//    un verbo de encuentro ("nos vemos", "quedamos", "te espero",
+//    "ven a", "vamos a", "te paso a buscar", "paso por ti") JUNTO a
+//    un ancla de tiempo o lugar ("mañana", "hoy", "el sábado",
+//    "a las", "en mi casa", "en el parque"…). Frases de alto riesgo
+//    disparan solas ("ven a mi casa", "vamos a mi apartamento",
+//    "te paso a buscar": implican la dirección de la casa).
+//    Vaguedad o hipótesis NO disparan ("cuando nos veamos",
+//    "algún día nos vemos", "me gustaría conocerte", "nos vemos
+//    luego" sin lugar ni hora), ni un encuentro ya pasado ("ayer
+//    nos vimos en el parque"). Se clasifica después de 'dinero'
+//    y antes de 'enlace': si el mensaje pide dinero, el aviso de
+//    dinero manda, que es el riesgo más agudo.
 export function detectarDatoSensible(texto) {
   if (!texto || typeof texto !== 'string') return null;
   const t = texto;
@@ -141,6 +155,10 @@ export function detectarDatoSensible(texto) {
     /env[íi]ame\s+(dinero|saldo)/i.test(t) ||
     /n[úu]mero\s+de\s+tarjeta/i.test(t);
   if (dinero) return 'dinero';
+  const encuentro = /(ven\s+a\s+mi\s+casa|vamos\s+a\s+mi\s+(apartamento|apto\.?|casa)|te\s+paso\s+a\s+buscar|paso\s+por\s+ti)/i.test(t) ||
+    /(nos\s+vemos|quedamos|quedemos|te\s+espero|ven\s+a|vamos\s+a)\b[^.]{0,30}(mañana|hoy|el\s+(sábado|domingo|lunes|martes|miércoles|jueves|viernes)|a\s+las|en\s+(mi|tu)\s+casa|mi\s+casa|tu\s+casa|en\s+el\s+(parque|plaza|hotel)|mi\s+apartamento)/i.test(t) ||
+    /(mañana|hoy|el\s+(sábado|domingo|lunes|martes|miércoles|jueves|viernes)|a\s+las|en\s+(mi|tu)\s+casa|mi\s+casa|tu\s+casa|en\s+el\s+(parque|plaza|hotel)|mi\s+apartamento)\b[^.]{0,30}(nos\s+vemos|quedamos|quedemos|te\s+espero|ven\s+a|vamos\s+a)/i.test(t);
+  if (encuentro) return 'encuentro';
   const acortado = /\b(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|shorte\.st|tiny\.cc)\/\S+/i.test(t);
   const tieneUrl = /(https?:\/\/|www\.)[^\s]+/i.test(t) || acortado;
   const enlace = tieneUrl && (acortado ||

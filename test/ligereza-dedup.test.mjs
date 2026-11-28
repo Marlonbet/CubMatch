@@ -57,7 +57,9 @@ test('bundle con dedup: baja de 218 KB (antes 222,5 KB)', () => {
   // v1.12.24 medido: ~220339 B — el aviso anti-fraude de la foto
   // del documento de identidad añade ~0,7 KB; este tope sube
   // a 222000 B.
-  assert.ok(bytes < 222000, `esperaba <222000 bytes, son ${bytes}`);
+  // v1.12.26 medido: 222596 B — el aviso anti-fraude de la propuesta
+  // de quedar en persona añade ~1,2 KB; este tope sube a 223000 B.
+  assert.ok(bytes < 223000, `esperaba <223000 bytes, son ${bytes}`);
   assert.ok(bytes > 150000, `bundle sospechosamente chico: ${bytes} bytes`);
 });
 
